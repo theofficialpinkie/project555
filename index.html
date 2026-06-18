@@ -268,6 +268,46 @@ function runSpatialChecks(spans){
     }
   }
 
+  // Check: PAY LIMIT label with no adjacent item number
+  const payLimitSpans=spans.filter(s=>/PAY LIMIT (FOR|OF)/i.test(s.text));
+  for(const ps of payLimitSpans){
+    const nearby=itemSpans.filter(is=>isAdjacent(ps,is,250));
+    if(nearby.length===0){
+      findings.push({
+        type:'missing_item_number',severity:'HIGH',
+        title:`Pay limit label has no item number: "${ps.text.trim()}"`,
+        description:`A pay limit boundary is defined ("${ps.text.trim()}") but no (ITEM NO.) callout appears within 250 PDF points. The pay item for this concrete scope is not called out on this sheet.`,
+        element_detected:ps.text.trim(),
+        expected_item:'555.0021 or 555.0011',
+        evidence:`"${ps.text.trim()}" at PDF coords (${Math.round(ps.x)}, ${Math.round(ps.y)}). No item number found within 250pt radius. Nearest item numbers on sheet: ${itemSpans.length>0?itemSpans.map(i=>i.text).join(', ').substring(0,80):'NONE'}`,
+        suggested_action:'Add (ITEM NO. 555.0021) or (ITEM NO. 555.0011) adjacent to the pay limit label, or in a concrete table on this sheet.',
+        confidence:0.91,
+        pdfX:ps.x,pdfY:ps.y,pdfX2:ps.x+300,pdfY2:ps.y+30
+      });
+    } else {
+      passes.push({title:`Pay limit "${ps.text.trim().substring(0,30)}" has item number`,detail:`Found: ${nearby[0].text}`});
+    }
+  }
+
+  // Check: sheet has concrete placement bubbles (per legend) but zero item numbers
+  const placementLegend=spans.filter(s=>/INDICATES CONCRETE PLACEMENT NUMBER/i.test(s.text));
+  if(placementLegend.length>0&&itemSpans.length===0){
+    findings.push({
+      type:'missing_item_number',severity:'HIGH',
+      title:'Concrete placement bubbles exist but NO item numbers on sheet',
+      description:'This sheet uses numbered concrete placement bubbles (per legend: "INDICATES CONCRETE PLACEMENT NUMBER") but there are zero (ITEM NO.) callouts anywhere on the sheet. The concrete scope — footing, stem, wingwall — has no pay items referenced.',
+      element_detected:'- INDICATES CONCRETE PLACEMENT NUMBER',
+      expected_item:'555.0011 (footing), 555.0021 (structural concrete)',
+      evidence:`Legend confirms numbered concrete placements exist. Total item numbers found on sheet: 0. This sheet needs a concrete table with PLACEMENT | QUANTITY | UNIT | ITEM NO. columns.`,
+      suggested_action:'Add a concrete table to this sheet listing each placement number with its quantity, unit, and item number (555.0011 or 555.0021). Or confirm item numbers are on a companion sheet and add a cross-reference note.',
+      confidence:0.95,
+      pdfX:placementLegend[0].x,pdfY:placementLegend[0].y,
+      pdfX2:placementLegend[0].x+400,pdfY2:placementLegend[0].y+20
+    });
+  } else if(placementLegend.length>0&&itemSpans.length>0){
+    passes.push({title:'Concrete placement bubbles have item numbers on sheet',detail:`${itemSpans.length} item number(s) found`});
+  }
+
   const known=['555.0011','555.0021','556.0202','556.0205','556.03','564.0501','565.2035','565.2025','555.72940001','645.48010001','567.60','557.1012','557.1112','568.70','569.04','559.01','559.02','572.00020101'];
   const foundNums=itemSpans.map(s=>{const m=s.text.match(/ITEM NO\.\s*([\d.]+)/i);return m?m[1]:null;}).filter(Boolean);
   for(const num of foundNums){
@@ -278,7 +318,7 @@ function runSpatialChecks(spans){
     }
   }
 
-  if(proposedSpans.length===0&&concreteTbl.length===0&&itemSpans.length===0){
+  if(proposedSpans.length===0&&concreteTbl.length===0&&itemSpans.length===0&&payLimitSpans.length===0&&placementLegend.length===0){
     passes.push({title:'No pay-item elements detected',detail:'Sheet appears to be notes, schedule, or index — no PROPOSED elements found'});
   }
   return {findings,passing_checks:passes};
