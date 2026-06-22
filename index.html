@@ -353,67 +353,44 @@ const IRRELEVANT_KEYWORDS = [
 ];
 
 function extractSheetTitle(spans) {
-  addDebug(`[extractSheetTitle] Total spans: ${spans.length}`);
+  // Anchor to DRAWING NO. or SHEET NO. (always present on engineering drawings)
+  const anchor = spans.find(s => /DRAWING NO|SHEET NO/i.test(s.text));
 
-  // Sort by Y position (top of sheet first)
-  const topSpans = spans.slice().sort((a, b) => a.y - b.y).slice(0, 30);
-
-  addDebug(`[extractSheetTitle] Top 30 spans by Y position:`);
-  topSpans.slice(0, 10).forEach((s, i) => {
-    addDebug(`  [${i}] "${s.text.substring(0, 40)}"`);
-  });
-
-  // Try regex-based extraction
-  const titleCandidates = topSpans
-    .filter(s => {
-      const match = /^[A-Z0-9\s\-&().,/]+$/.test(s.text.trim()) && s.text.trim().length > 5;
-      if (match) {
-        addDebug(`  ✓ Regex match: "${s.text.trim().substring(0, 40)}"`);
-      }
-      return match;
-    })
-    .map(s => s.text.trim());
-
-  if (titleCandidates.length > 0) {
-    const best = titleCandidates.sort((a, b) => b.length - a.length)[0];
-    addDebug(`[extractSheetTitle] FOUND (regex): "${best}"`);
-    return best;
+  if (!anchor) {
+    addDebug(`[extractSheetTitle] No DRAWING NO./SHEET NO. anchor found`);
+    return '';
   }
 
-  addDebug(`[extractSheetTitle] No regex matches, trying fallback patterns...`);
+  addDebug(`[extractSheetTitle] Anchor found at Y=${Math.round(anchor.y)}`);
 
-  // Fallback: pattern matching
-  const knownPatterns = [
-    /GENERAL NOTES/i,
-    /ESTIMATE OF QUANTITIES/i,
-    /BEGIN ABUTMENT/i,
-    /END ABUTMENT/i,
-    /FOOTING/i,
-    /PIER/i,
-    /WING WALL/i,
-    /ABUTMENT/i,
-    /RETAINING WALL/i,
-    /CONCRETE/i,
-    /GIRDER ELEVATION/i,
-    /FRAMING PLAN/i,
-    /LANDSCAPE DETAILS/i,
-    /TRANSVERSE SECTION/i,
-    /PILE LAYOUT/i,
-    /BAR LIST/i,
-    /REINFORCEMENT/i,
-    /SECTION/i,
+  // Look for title candidates NEAR the anchor (within 150 Y units)
+  const titleKeywords = [
+    'DETAIL', 'PLAN', 'ELEVATION', 'FOOTING', 'ABUTMENT',
+    'PIER', 'WING', 'CONCRETE', 'LAYOUT', 'SECTION',
+    'CROSSING', 'TRUNK', 'SLAB', 'BEARING', 'RAILING',
+    'GIRDER', 'FRAMING', 'TRANSVERSE'
   ];
 
-  for (const pattern of knownPatterns) {
-    const match = spans.find(s => pattern.test(s.text));
-    if (match) {
-      const title = match.text.trim().substring(0, 60);
-      addDebug(`[extractSheetTitle] FOUND (fallback): "${title}" (matched: ${pattern})`);
-      return title;
-    }
+  const candidates = spans.filter(s => {
+    const nearAnchor = Math.abs(s.y - anchor.y) < 150;
+    const isLengthOk = s.text.length > 5 && s.text.length < 100;
+    const hasTitle = titleKeywords.some(kw => s.text.toUpperCase().includes(kw));
+
+    return nearAnchor && isLengthOk && hasTitle;
+  });
+
+  addDebug(`[extractSheetTitle] ${candidates.length} title candidates near anchor`);
+  candidates.slice(0, 3).forEach((c, i) => {
+    addDebug(`  [${i}] "${c.text}"`);
+  });
+
+  if (candidates.length > 0) {
+    const title = candidates[0].text.trim().substring(0, 80);
+    addDebug(`[extractSheetTitle] SELECTED: "${title}"`);
+    return title;
   }
 
-  addDebug(`[extractSheetTitle] FAILED: no title found`);
+  addDebug(`[extractSheetTitle] No title found`);
   return '';
 }
 
