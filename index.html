@@ -505,6 +505,61 @@ function matchRule(text,rule){
   return rule.match==='startsWith'?t.startsWith(p):t.includes(p);
 }
 
+// ── Section 555 item-number helpers ──────────────────────────────────────
+// A 555 item looks like 555.0011 / 555.72940001 etc. Non-555 items
+// (645.4801..., 202.19, ...) must NEVER satisfy Section 555 coverage.
+const RE_555_ITEM = /\b555\.\d+[A-Z0-9.]*\b/;
+
+// Structure terms that make a PAY LIMIT callout a 555-relevant concrete callout.
+const STRUCT_555_TERMS = ['ABUTMENT','FOOTING','PIER','WINGWALL','WING WALL','RETAINING WALL','CONCRETE'];
+
+function extract555ItemSpans(spans){
+  return spans.filter(s => RE_555_ITEM.test(s.text));
+}
+
+function hasAny555OnSheet(spans){
+  return spans.some(s => RE_555_ITEM.test(s.text));
+}
+
+// True if the sheet shows a concrete-placement legend or concrete table.
+function hasConcretePlacementEvidence(spans){
+  const upper = spans.map(s => s.text.toUpperCase());
+  const phrases = [
+    'INDICATES CONCRETE PLACEMENT NUMBER',
+    'CONCRETE PLACEMENT NUMBER',
+    'CONCRETE TABLE',
+    'PLACEMENT ITEM NO'
+  ];
+  if (phrases.some(p => upper.some(t => t.includes(p)))) return true;
+  // PLACEMENT / QUANTITY / ITEM NO column-header combo
+  return upper.some(t => t.includes('PLACEMENT'))
+      && upper.some(t => t.includes('QUANTITY'))
+      && upper.some(t => t.includes('ITEM NO'));
+}
+
+// True if the sheet has a concrete table AND that table carries 555 items.
+function hasConcreteTableWith555(spans){
+  const upper = spans.map(s => s.text.toUpperCase());
+  const hasTable = upper.some(t => t.includes('CONCRETE TABLE'))
+    || (upper.some(t => t.includes('PLACEMENT'))
+        && upper.some(t => t.includes('QUANTITY'))
+        && upper.some(t => t.includes('ITEM NO')));
+  return hasTable && hasAny555OnSheet(spans);
+}
+
+// 555 item spans adjacent to a given element span.
+function findNearby555(elementSpan, spans, threshold){
+  return extract555ItemSpans(spans).filter(is => isAdjacent(elementSpan, is, threshold));
+}
+
+// Concatenated text of all spans within `threshold` of the element span.
+function getNearbyText(elementSpan, spans, threshold){
+  return spans
+    .filter(s => isAdjacent(elementSpan, s, threshold))
+    .map(s => s.text)
+    .join(' ');
+}
+
 function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
   const findings = [];
   const passes = [];
@@ -523,62 +578,150 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
     return { findings, passing_checks: passes, sheet_type: relevance.reason, titleData, relevance };
   }
 
-  const itemSpans = spans.filter(s => /\(ITEM NO\./i.test(s.text));
-
   const TH = RULES.adjacency_threshold_pts;
   const flaggedElements = new Set();
 
-  // ── Check triggers (keep existing ones, just fewer) ──
+  // Section 555 coverage facts for this sheet (computed once).
+  const gnHas555 = generalNotesItems.size > 0;        // General Notes carries 555 items
+  const tableHas555 = hasConcreteTableWith555(spans); // concrete table carries 555 items
+  const item555Spans = extract555ItemSpans(spans);
+
+  // Shared metadata stamped onto every finding.
+  const fmeta = {
+    sheet_relevance: relevance.sheetType,
+    sheet_title: titleData.bestTitle,
+    drawing_title: (titleData.drawingTitleCandidates[0] && titleData.drawingTitleCandidates[0].text) || ''
+  };
+
+  // ── Element triggers (narrow). PAY LIMIT is owned by Check B below, so it is
+  //    skipped here to avoid double-flagging the same callout. ──
   for (const trigger of RULES.work_element_triggers) {
+    if (trigger.id === 'pay_limit') continue;
     const matchingSpans = spans.filter(s =>
       matchRule(s.text, trigger) && !flaggedElements.has(s.text.trim())
     );
 
     for (const ms of matchingSpans) {
       flaggedElements.add(ms.text.trim());
-      const nearby = itemSpans.filter(is => isAdjacent(ms, is, TH));
+      const nearby555 = findNearby555(ms, spans, TH);
 
-      if (nearby.length === 0) {
-        // If General Notes has ANY items, downgrade to MEDIUM
-        // If General Notes is empty, keep as HIGH
-        const severity = generalNotesItems.size > 0 ? 'MEDIUM' : 'HIGH';
-
-        findings.push({
-          type: 'missing_item_number',
-          severity: severity,
-          rule_id: trigger.id,
-          title: severity === 'MEDIUM'
-            ? `Missing item number (but General Notes has items): "${ms.text.trim().substring(0, 45)}"`
-            : `Missing item number: "${ms.text.trim().substring(0, 45)}"`,
-          description: severity === 'MEDIUM'
-            ? `${trigger.description}. No adjacent callout, but General Notes sheet contains pay items — may be cross-referenced there.`
-            : `${trigger.description}. "${ms.text.trim()}" appears on this sheet but no (ITEM NO.) callout is adjacent, and no items in General Notes.`,
-          element_detected: ms.text.trim(),
-          evidence: `Element at PDF coords (${Math.round(ms.x)}, ${Math.round(ms.y)}).`,
-          suggested_action: severity === 'MEDIUM'
-            ? 'Check if covered by General Notes cross-reference.'
-            : 'Verify which item number covers this element and add it adjacent to the callout.',
-          confidence: severity === 'MEDIUM' ? 0.75 : 0.90,
-          sheet_relevance: relevance.sheetType,
-          sheet_title: titleData.bestTitle,
-          drawing_title: (titleData.drawingTitleCandidates[0] && titleData.drawingTitleCandidates[0].text) || '',
-          pdfX: ms.x, pdfY: ms.y, pdfX2: ms.x2 + 200, pdfY2: ms.y2 + 20
-        });
-      } else {
+      if (nearby555.length > 0) {
+        // Only an ADJACENT 555 item counts as a pass for the element.
         passes.push({
-          title: `${ms.text.trim().substring(0, 35)} has item number`,
-          detail: `Found: ${nearby[0].text}`
+          title: `${ms.text.trim().substring(0, 35)} has 555 item`,
+          detail: `Found: ${nearby555[0].text.trim()}`
         });
+        continue;
       }
+
+      // No adjacent 555. A sheet-level 555 table or General Notes 555 item only
+      // DOWNGRADES to MEDIUM — it never makes the element pass.
+      const downgrade = tableHas555 || gnHas555;
+      const severity = downgrade ? 'MEDIUM' : 'HIGH';
+      findings.push({
+        type: 'missing_item_number',
+        severity,
+        rule_id: trigger.id,
+        title: severity === 'MEDIUM'
+          ? `Missing adjacent 555 item (covered elsewhere): "${ms.text.trim().substring(0, 45)}"`
+          : `Missing Section 555 item number: "${ms.text.trim().substring(0, 45)}"`,
+        description: severity === 'MEDIUM'
+          ? `${trigger.description}. No adjacent 555 item, but ${tableHas555 ? 'a concrete table on this sheet' : 'General Notes'} contains 555 items — verify cross-reference.`
+          : `${trigger.description}. "${ms.text.trim()}" appears on this sheet but no adjacent 555.xxxx item, and no 555 item anywhere on the sheet or in General Notes.`,
+        element_detected: ms.text.trim(),
+        evidence: `Element at PDF coords (${Math.round(ms.x)}, ${Math.round(ms.y)}).`,
+        suggested_action: severity === 'MEDIUM'
+          ? 'Verify the concrete table / General Notes 555 item covers this element.'
+          : 'Add or verify the adjacent Section 555 item number for this element.',
+        confidence: severity === 'MEDIUM' ? 0.75 : 0.90,
+        ...fmeta,
+        pdfX: ms.x, pdfY: ms.y, pdfX2: ms.x2 + 200, pdfY2: ms.y2 + 20
+      });
     }
   }
 
+  // ── Check A: concrete_placement_legend_no_555_context ──
+  // Concrete placement legend/table exists but no 555 item anywhere on sheet.
+  if (hasConcretePlacementEvidence(spans) && !hasAny555OnSheet(spans)) {
+    const anchor = spans.find(s => {
+      const t = s.text.toUpperCase();
+      return t.includes('CONCRETE PLACEMENT NUMBER')
+          || t.includes('CONCRETE TABLE')
+          || t.includes('PLACEMENT ITEM NO')
+          || t.includes('PLACEMENT');
+    }) || spans[0];
+    const severity = gnHas555 ? 'MEDIUM' : 'HIGH';
+    findings.push({
+      type: 'concrete_placement_no_555',
+      severity,
+      rule_id: 'concrete_placement_legend_no_555_context',
+      title: severity === 'MEDIUM'
+        ? 'Concrete placement reference has no 555 item on sheet, but General Notes has 555 item'
+        : 'Concrete placement reference missing 555 item number',
+      description: 'Sheet shows concrete placement bubbles / a concrete table, but no 555.xxxx item number appears anywhere on the sheet.',
+      element_detected: anchor.text.trim(),
+      evidence: `Concrete placement reference at PDF coords (${Math.round(anchor.x)}, ${Math.round(anchor.y)}).`,
+      suggested_action: severity === 'MEDIUM'
+        ? 'Verify General Notes item covers this concrete placement.'
+        : 'Add or verify Section 555 item number for concrete placement.',
+      confidence: severity === 'MEDIUM' ? 0.75 : 0.85,
+      ...fmeta,
+      pdfX: anchor.x, pdfY: anchor.y, pdfX2: anchor.x2 + 200, pdfY2: anchor.y2 + 20
+    });
+  }
+
+  // ── Check B: pay_limit_structure_no_adjacent_555 ──
+  // A PAY LIMIT callout near a concrete structure term, lacking an adjacent 555.
+  const payLimitSpans = spans.filter(s => /PAY LIMIT/i.test(s.text));
+  for (const pl of payLimitSpans) {
+    if (flaggedElements.has(pl.text.trim())) continue;
+    const nearbyText = (getNearbyText(pl, spans, TH * 2) + ' ' + pl.text).toUpperCase();
+    const structTerm = STRUCT_555_TERMS.find(term => nearbyText.includes(term));
+    if (!structTerm) continue; // not a 555-relevant pay-limit callout
+
+    flaggedElements.add(pl.text.trim());
+    const nearby555 = findNearby555(pl, spans, TH);
+    if (nearby555.length > 0) {
+      passes.push({
+        title: `Pay limit (${structTerm}) has 555 item`,
+        detail: `Found: ${nearby555[0].text.trim()}`
+      });
+      continue;
+    }
+
+    let severity, title;
+    if (tableHas555) {
+      severity = 'MEDIUM';
+      title = 'Pay limit has no adjacent 555 item, but concrete table contains 555 items.';
+    } else if (gnHas555) {
+      severity = 'MEDIUM';
+      title = 'Pay limit has no adjacent 555 item, but General Notes has 555 item.';
+    } else {
+      severity = 'HIGH';
+      title = 'Pay limit missing adjacent Section 555 item number.';
+    }
+    findings.push({
+      type: 'pay_limit_no_555',
+      severity,
+      rule_id: 'pay_limit_structure_no_adjacent_555',
+      title,
+      description: `Pay limit callout for ${structTerm} ("${pl.text.trim().substring(0, 50)}") has no adjacent 555.xxxx item number.`,
+      element_detected: pl.text.trim(),
+      evidence: `Pay limit at PDF coords (${Math.round(pl.x)}, ${Math.round(pl.y)}); structure context: ${structTerm}.`,
+      suggested_action: severity === 'MEDIUM'
+        ? 'Verify the concrete table / General Notes 555 item covers this pay limit.'
+        : 'Add or verify the adjacent Section 555 item number for this pay limit.',
+      confidence: severity === 'MEDIUM' ? 0.75 : 0.90,
+      ...fmeta,
+      pdfX: pl.x, pdfY: pl.y, pdfX2: pl.x2 + 200, pdfY2: pl.y2 + 20
+    });
+  }
+
   // Nothing to check
-  if (spans.filter(s => RULES.work_element_triggers.some(t => matchRule(s.text, t))).length === 0
-     && itemSpans.length === 0) {
+  if (findings.length === 0 && passes.length === 0 && item555Spans.length === 0) {
     passes.push({
-      title: 'No pay-item elements detected on this sheet',
-      detail: 'Sheet appears to be structural steel, bearings, or notes'
+      title: 'No 555 pay-item elements detected on this sheet',
+      detail: 'No triggers, pay limits, concrete placement evidence, or 555 items found'
     });
   }
 
@@ -607,7 +750,9 @@ async function handleFile(file){
   document.getElementById('statusLine').textContent=`${totalPages} sheet${totalPages!==1?'s':''} loaded`;
 }
 
-// Pass 1: harvest every pay-item number that appears on any GENERAL NOTES sheet.
+// Pass 1: harvest every SECTION 555 pay-item number (555.xxxx) that appears on
+// any GENERAL NOTES sheet. Non-555 items (e.g. 645.48010001) are NOT counted —
+// they do not constitute Section 555 coverage and must not act as a fallback.
 async function extractGeneralNotesItems(pdfDoc){
   const globalItems=new Set();
   for(let pageNum=1;pageNum<=pdfDoc.numPages;pageNum++){
@@ -616,7 +761,7 @@ async function extractGeneralNotesItems(pdfDoc){
     // Only process GENERAL NOTES sheets
     if(spans.some(s=>/GENERAL NOTES/i.test(s.text))){
       const allText=spans.map(s=>s.text).join(' ');
-      const matches=allText.match(/\b(\d{3}\.\d+)\b/g)||[];
+      const matches=allText.match(/\b555\.\d+[A-Z0-9.]*\b/g)||[];
       matches.forEach(m=>globalItems.add(m.trim()));
     }
   }
