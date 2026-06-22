@@ -71,6 +71,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--ink);font-s
 .canvas-wrap{position:relative;display:inline-block;}
 canvas{border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.12);display:block;}
 .flag-box{position:absolute;border:2px solid var(--red);border-radius:4px;background:rgba(192,57,43,0.08);}
+.focus-highlight{position:absolute;border-radius:4px;pointer-events:none;z-index:5;}
+.focus-highlight-animate{border:2px solid var(--red);background:rgba(192,57,43,0.35);animation:focusPulse 2s ease-out;}
+.focus-highlight-rest{border:1px solid var(--red);background:rgba(192,57,43,0.06);}
+@keyframes focusPulse{0%{background:rgba(192,57,43,0.5);box-shadow:0 0 0 4px rgba(192,57,43,0.25);}100%{background:rgba(192,57,43,0.12);box-shadow:0 0 0 0 rgba(192,57,43,0);}}
+.tc-item{cursor:pointer;}
+.tc-item:hover{color:var(--blue)!important;text-decoration:underline;}
+.cc-row:hover{background:var(--bg);}
 .run-bar{padding:12px 16px;background:var(--surface);border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-shrink:0;}
 .btn{padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--ink);font-family:'Inter',sans-serif;transition:all 0.15s;}
 .btn:hover{background:var(--bg);}
@@ -378,6 +385,14 @@ const ENGINEERING_KEYWORDS = [
   'SLAB', 'APPROACH', 'RETAINING', 'CROSSING', 'TRUNK', 'EBSS'
 ];
 
+// Terms that should pull a candidate INTO the title cluster even when it is not
+// top-ranked by score. This is about cluster completeness for Section 555 — it
+// is NOT the relevance trigger list (that stays in isSheet555RelevantFromTitleCluster).
+const TITLE_555_RELEVANCE_TERMS = [
+  'PIER', 'ABUTMENT', 'FOOTING', 'RETAINING WALL', 'WING WALL', 'WINGWALL',
+  'CONCRETE', 'APPROACH SLAB', 'SUPERSTRUCTURE SLAB'
+];
+
 function isMetadataLabel(text) {
   const t = text.toUpperCase().trim();
   return METADATA_LABEL_PATTERNS.some(p => p.test(t));
@@ -413,10 +428,13 @@ function scoreCandidate(text, x, y, tierIdx) {
 // Build the page-level title cluster. Returns:
 //   { bestTitle, titleCluster[], titleClusterText, sheetCandidates[], drawingTitleCandidates[] }
 function extractTitleData(spans) {
-  // Group valid candidates by (rounded) font size.
+  // Group valid candidates by (rounded) font size, and keep a flat list of EVERY
+  // valid candidate (all font tiers) so a low-ranked 555 title still gets in.
   const bySize = {};
+  const allValid = [];
   spans.forEach(s => {
     if (!isValidCandidate(s.text)) return;
+    allValid.push({ text: s.text.trim(), x: s.x, y: s.y });
     const size = Math.round((s.fontSize || 12) * 2) / 2;
     (bySize[size] = bySize[size] || []).push(s);
   });
@@ -440,12 +458,21 @@ function extractTitleData(spans) {
   all.sort((a, b) => b.score - a.score);
 
   const bestCand = all[0] || null;
-  const sheetCandidates = all.slice(0, 5);
-  const drawingTitleCandidates = all.filter(c => c.tier === 1).slice(0, 5);
+  const sheetCandidates = all.slice(0, 10);
+  const drawingTitleCandidates = all.filter(c => c.tier === 1).slice(0, 10);
 
-  // Assemble the cluster (deduped, order-preserving): best title, top sheet
-  // candidates, drawing-title candidates, and any high-scoring title-like text.
+  // Any valid candidate (ANY font tier, ANY score) that contains a Section 555
+  // relevance term — included even when it is not top-ranked.
+  const relevanceCands = allValid.filter(c => {
+    const u = c.text.toUpperCase();
+    return TITLE_555_RELEVANCE_TERMS.some(term => u.includes(term));
+  });
+
+  // Assemble the cluster (deduped, order-preserving): best title, top 10 sheet
+  // candidates, top 10 drawing-title candidates, any high-scoring title-like
+  // text, and every relevance-term candidate.
   const cluster = [];
+  const clusterCands = [];
   const seen = new Set();
   const add = c => {
     if (!c) return;
@@ -453,16 +480,19 @@ function extractTitleData(spans) {
     if (seen.has(key)) return;
     seen.add(key);
     cluster.push(c.text);
+    clusterCands.push({ text: c.text, x: c.x, y: c.y });
   };
   add(bestCand);
   sheetCandidates.forEach(add);
   drawingTitleCandidates.forEach(add);
   all.filter(c => c.score >= 80).forEach(add);
+  relevanceCands.forEach(add);
 
   const data = {
     bestTitle: bestCand ? bestCand.text : '',
     titleCluster: cluster,
     titleClusterText: cluster.join(' | '),
+    clusterCands,
     sheetCandidates,
     drawingTitleCandidates
   };
@@ -474,28 +504,42 @@ function extractTitleData(spans) {
 // 555 relevance from the WHOLE title cluster (not a single fragile title).
 // Veto first, then relevance keywords.
 function isSheet555RelevantFromTitleCluster(titleData) {
+  // Relevance is decided ONLY from the full titleClusterText — never bestTitle.
   const text = (titleData.titleClusterText || '').toUpperCase();
-  addDebug(`[is555] cluster="${text.substring(0, 80)}"`);
+  const nTerms = (titleData.titleCluster || []).length;
 
-  if (!text) return { relevant: false, reason: 'No title cluster extracted' };
+  if (!text) {
+    addDebug('[is555] no relevant term found across 0 titleCluster terms');
+    return { relevant: false, reason: 'No title cluster extracted', matchedTerm: null };
+  }
 
   // Veto list (sheets that are not 555 pay-item sheets).
-  if (text.includes('PILE LAYOUT'))           return { relevant: false, reason: 'Veto: PILE LAYOUT' };
-  if (text.includes('BAR LIST'))              return { relevant: false, reason: 'Veto: BAR LIST' };
-  if (text.includes('REINFORCEMENT DETAIL'))  return { relevant: false, reason: 'Veto: REINFORCEMENT DETAIL' };
-  if (text.includes('GENERAL NOTES'))         return { relevant: false, reason: 'Veto: GENERAL NOTES' };
-  if (text.includes('ESTIMATE OF QUANTITIES'))return { relevant: false, reason: 'Veto: ESTIMATE OF QUANTITIES' };
-  if (text.includes('INDEX'))                 return { relevant: false, reason: 'Veto: INDEX' };
+  if (text.includes('PILE LAYOUT'))           return { relevant: false, reason: 'Veto: PILE LAYOUT', matchedTerm: null };
+  if (text.includes('BAR LIST'))              return { relevant: false, reason: 'Veto: BAR LIST', matchedTerm: null };
+  if (text.includes('REINFORCEMENT DETAIL'))  return { relevant: false, reason: 'Veto: REINFORCEMENT DETAIL', matchedTerm: null };
+  if (text.includes('GENERAL NOTES'))         return { relevant: false, reason: 'Veto: GENERAL NOTES', matchedTerm: null };
+  if (text.includes('ESTIMATE OF QUANTITIES'))return { relevant: false, reason: 'Veto: ESTIMATE OF QUANTITIES', matchedTerm: null };
+  if (text.includes('INDEX'))                 return { relevant: false, reason: 'Veto: INDEX', matchedTerm: null };
 
-  // Relevance keywords.
-  if (text.includes('FOOTING'))                                  return { relevant: true, sheetType: 'FOOTING' };
-  if (text.includes('PIER'))                                     return { relevant: true, sheetType: 'PIER' };
-  if (text.includes('ABUTMENT'))                                 return { relevant: true, sheetType: 'ABUTMENT' };
-  if (text.includes('WINGWALL') || text.includes('WING WALL'))   return { relevant: true, sheetType: 'WINGWALL' };
-  if (text.includes('RETAINING WALL'))                           return { relevant: true, sheetType: 'RETAINING WALL' };
-  if (text.includes('CONCRETE'))                                 return { relevant: true, sheetType: 'CONCRETE' };
+  // Relevance trigger list (unchanged) — scan the full titleClusterText.
+  const relMatchers = [
+    { term: 'FOOTING',        type: 'FOOTING' },
+    { term: 'PIER',           type: 'PIER' },
+    { term: 'ABUTMENT',       type: 'ABUTMENT' },
+    { term: 'WINGWALL',       type: 'WINGWALL' },
+    { term: 'WING WALL',      type: 'WINGWALL' },
+    { term: 'RETAINING WALL', type: 'RETAINING WALL' },
+    { term: 'CONCRETE',       type: 'CONCRETE' },
+  ];
+  for (const m of relMatchers) {
+    if (text.includes(m.term)) {
+      addDebug(`[is555] matchedTerm="${m.term}" source="titleClusterText"`);
+      return { relevant: true, sheetType: m.type, matchedTerm: m.term };
+    }
+  }
 
-  return { relevant: false, reason: `Unknown title cluster: ${text.substring(0, 30)}` };
+  addDebug(`[is555] no relevant term found across ${nTerms} titleCluster terms`);
+  return { relevant: false, reason: `Unknown title cluster: ${text.substring(0, 30)}`, matchedTerm: null };
 }
 
 // Literal, case-insensitive matcher for RULES triggers (no regex — precise)
@@ -512,6 +556,17 @@ const RE_555_ITEM = /\b555\.\d+[A-Z0-9.]*\b/;
 
 // Structure terms that make a PAY LIMIT callout a 555-relevant concrete callout.
 const STRUCT_555_TERMS = ['ABUTMENT','FOOTING','PIER','WINGWALL','WING WALL','RETAINING WALL','CONCRETE'];
+
+// ── Body-context 555 review ──────────────────────────────────────────────
+// Some Section 555 concrete work shows up only in body text / notes (e.g. a
+// LANDSCAPE DETAILS sheet calling out PROPOSED CONCRETE FORMLINER / POLYPANELS
+// near an ABUTMENT). Those sheets are skipped by the title-cluster gate. This
+// adds a SECOND relevance path that scans body text for a concrete term sitting
+// near a structure term, independent of the title cluster.
+// Generic NYSDOT pay-item number (any spec section): 555.0011, 645.48010001, 202.19.
+const RE_ANY_ITEM = /\b\d{3}\.\d{2,}[A-Z0-9.]*\b/;
+const BODY_CONCRETE_TERMS = ['CONCRETE','FORMLINER','ARCHITECTURAL TREATMENT','CONCRETE RECESS','CONCRETE PLACEMENT','CONCRETE TABLE','POLYPANEL','POLYPANELS'];
+const BODY_STRUCTURE_TERMS = ['ABUTMENT','WINGWALL','WING WALL','FOOTING','PIER','RETAINING WALL','CULVERT'];
 
 function extract555ItemSpans(spans){
   return spans.filter(s => RE_555_ITEM.test(s.text));
@@ -560,22 +615,136 @@ function getNearbyText(elementSpan, spans, threshold){
     .join(' ');
 }
 
+// Spans whose text contains a body concrete term.
+function findConcreteContextSpans(spans){
+  return spans.filter(s => {
+    const t = s.text.toUpperCase();
+    return BODY_CONCRETE_TERMS.some(term => t.includes(term));
+  });
+}
+
+// Nearest structure-term context for a concrete span (checks neighbours + own text).
+// Returns {term, span} or null.
+function findNearbyStructureContext(span, spans, threshold){
+  for (const s of spans){
+    if (!isAdjacent(span, s, threshold)) continue;
+    const t = s.text.toUpperCase();
+    const term = BODY_STRUCTURE_TERMS.find(st => t.includes(st));
+    if (term) return { term, span: s };
+  }
+  const own = BODY_STRUCTURE_TERMS.find(st => span.text.toUpperCase().includes(st));
+  if (own) return { term: own, span };
+  return null;
+}
+
+// Any pay-item-number spans (555 or not) within threshold of the span.
+function findNearbyItemNumbers(span, spans, threshold){
+  return spans.filter(s => s !== span && RE_ANY_ITEM.test(s.text) && isAdjacent(span, s, threshold));
+}
+
+// True if there IS a nearby item but NONE of them are Section 555.
+function hasOnlyNon555ItemNearby(span, spans, threshold){
+  const items = findNearbyItemNumbers(span, spans, threshold);
+  if (items.length === 0) return false;
+  return !items.some(s => RE_555_ITEM.test(s.text));
+}
+
+// True if any concrete-context span sits near a structure term (the body trigger).
+function hasBodyConcreteContext(spans){
+  const th = RULES.adjacency_threshold_pts;
+  return findConcreteContextSpans(spans).some(cs => findNearbyStructureContext(cs, spans, th));
+}
+
+// Scan concrete-context spans tied to a structure term and classify each:
+//   Adjacent 555  → PASS
+//   Non-555 Only  → MEDIUM finding (non_555_item_near_concrete_context)
+//   No Item Found → MEDIUM if General Notes carry 555, else HIGH
+// Returns { candidates[], findings[], passes[] }. A non-555 item NEVER counts as
+// Section 555 coverage.
+function analyzeConcreteContext(spans, gnHas555){
+  const th = RULES.adjacency_threshold_pts;
+  const findings = [], passes = [], candidates = [];
+  const seen = new Set();
+  for (const cs of findConcreteContextSpans(spans)){
+    const struct = findNearbyStructureContext(cs, spans, th);
+    if (!struct) continue; // only concrete work tied to a structure context
+    const key = cs.text.trim().toUpperCase() + '@' + Math.round(cs.x/20) + ',' + Math.round(cs.y/20);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const nearby555 = findNearby555(cs, spans, th);
+    const nearbyItems = findNearbyItemNumbers(cs, spans, th);
+    let status, nearbyItemText = '';
+    const coords = { pdfX: cs.x, pdfY: cs.y, pdfX2: cs.x2 + 200, pdfY2: cs.y2 + 20 };
+
+    if (nearby555.length > 0){
+      status = 'Adjacent 555';
+      nearbyItemText = nearby555[0].text.trim();
+      passes.push({ title: `Concrete context (${struct.term}) has 555 item`, detail: `Found: ${nearbyItemText}` });
+    } else if (nearbyItems.length > 0){
+      status = 'Non-555 Only';
+      nearbyItemText = nearbyItems[0].text.trim();
+      findings.push({
+        type: 'non_555_item_near_concrete_context',
+        severity: 'MEDIUM',
+        rule_id: 'non_555_item_near_concrete_context',
+        title: 'Concrete context has nearby non-555 item, verify Section 555 coverage',
+        description: 'Concrete-related work appears tied to a structure context, but the nearby item is not Section 555.',
+        element_detected: cs.text.trim(),
+        evidence: `Concrete context "${cs.text.trim().substring(0,40)}" near ${struct.term}; nearby item (ITEM NO. ${nearbyItemText}).`,
+        suggested_action: 'Verify whether this concrete-related work is covered by Section 555 or intentionally paid under the listed non-555 item.',
+        confidence: 0.7,
+        ...coords
+      });
+    } else {
+      status = 'No Item Found';
+      const severity = gnHas555 ? 'MEDIUM' : 'HIGH';
+      findings.push({
+        type: 'concrete_context_no_555_item',
+        severity,
+        rule_id: 'concrete_context_missing_555',
+        title: 'Concrete context missing nearby Section 555 item',
+        description: `Concrete-related work ("${cs.text.trim().substring(0,40)}") appears tied to ${struct.term}, but no Section 555 item number is nearby${gnHas555 ? ' (General Notes carry 555 items — verify cross-reference)' : ''}.`,
+        element_detected: cs.text.trim(),
+        evidence: `Concrete context at PDF coords (${Math.round(cs.x)}, ${Math.round(cs.y)}); structure context: ${struct.term}.`,
+        suggested_action: severity === 'MEDIUM'
+          ? 'Verify the General Notes 555 item covers this concrete work.'
+          : 'Add or verify a nearby Section 555 item number for this concrete work.',
+        confidence: severity === 'MEDIUM' ? 0.7 : 0.85,
+        ...coords
+      });
+    }
+    candidates.push({ text: cs.text.trim(), structureContext: struct.term, nearbyItem: nearbyItemText, status, ...coords });
+  }
+  return { candidates, findings, passes };
+}
+
 function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
   const findings = [];
   const passes = [];
 
   // Build the page-level title cluster, then gate on it.
   const titleData = extractTitleData(spans);
-  const relevance = isSheet555RelevantFromTitleCluster(titleData);
+  let relevance = isSheet555RelevantFromTitleCluster(titleData);
 
-  // GATE: Is this sheet even relevant for 555? If not, return clean/skipped but
-  // still carry titleData so the UI can show the cluster + why it was skipped.
+  // GATE: Is this sheet relevant for 555 from the title cluster? If not, try the
+  // SECOND relevance path: body-text concrete work tied to a structure context
+  // (e.g. LANDSCAPE DETAILS with CONCRETE FORMLINER near an ABUTMENT). If neither
+  // passes, return clean/skipped but still carry titleData for the UI.
   if (!relevance.relevant) {
-    passes.push({
-      title: 'Sheet not checked for 555 pay items',
-      detail: relevance.reason
-    });
-    return { findings, passing_checks: passes, sheet_type: relevance.reason, titleData, relevance };
+    if (hasBodyConcreteContext(spans)) {
+      relevance = {
+        relevant: true,
+        sheetType: 'BODY_CONTEXT_REVIEW',
+        reason: 'Body text contains concrete + structure context'
+      };
+    } else {
+      passes.push({
+        title: 'Sheet not checked for 555 pay items',
+        detail: relevance.reason
+      });
+      return { findings, passing_checks: passes, sheet_type: relevance.reason, titleData, relevance, concreteContext: [] };
+    }
   }
 
   const TH = RULES.adjacency_threshold_pts;
@@ -717,6 +886,18 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
     });
   }
 
+  // ── Body-context concrete review ──
+  // Always classify concrete-context candidates for the right-panel list. Their
+  // FINDINGS are only added on BODY_CONTEXT_REVIEW sheets (the ones the title
+  // gate would otherwise skip) — title-relevant sheets keep their existing
+  // checks unchanged to avoid double-flagging.
+  const cc = analyzeConcreteContext(spans, gnHas555);
+  if (relevance.sheetType === 'BODY_CONTEXT_REVIEW') {
+    cc.findings.forEach(f => Object.assign(f, fmeta));
+    findings.push(...cc.findings);
+    passes.push(...cc.passes);
+  }
+
   // Nothing to check
   if (findings.length === 0 && passes.length === 0 && item555Spans.length === 0) {
     passes.push({
@@ -725,7 +906,7 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
     });
   }
 
-  return { findings, passing_checks: passes, sheet_type: relevance.sheetType, titleData, relevance };
+  return { findings, passing_checks: passes, sheet_type: relevance.sheetType, titleData, relevance, concreteContext: cc.candidates };
 }
 
 document.getElementById('fileInput').addEventListener('change',e=>handleFile(e.target.files[0]));
@@ -797,12 +978,17 @@ function showClusterPreview(n){
   if(!spans)return;
   const titleData=extractTitleData(spans);
   const relevance=isSheet555RelevantFromTitleCluster(titleData);
+  const cc=analyzeConcreteContext(spans,globalGeneralNotesItems.size>0);
+  cc.candidates.forEach(c=>c.pageNum=n);
+  const previewResult={titleData,relevance,concreteContext:cc.candidates};
   const body=document.getElementById('findingsBody');
   body.innerHTML='';
   const hdr=document.createElement('div');hdr.className='sheet-group-hdr';hdr.style.cursor='default';
   hdr.innerHTML=`<span><strong>Sheet ${n}</strong> · not reviewed</span><span style="color:var(--muted);">preview</span>`;
   body.appendChild(hdr);
-  body.appendChild(renderTitleCluster({titleData,relevance}));
+  body.appendChild(renderTitleCluster(previewResult,n));
+  const ccCard=renderConcreteContext(previewResult,n);
+  if(ccCard)body.appendChild(ccCard);
   const note=document.createElement('div');
   note.style.cssText='font-size:11px;color:var(--muted);text-align:center;padding:10px;line-height:1.5;';
   note.textContent='Click "Review this sheet" to run the 555 checks.';
@@ -857,6 +1043,56 @@ function renderOverlays(findings){
   });
 }
 
+// ── Finding → PDF navigation ──────────────────────────────────────────────
+// Click a finding / concrete-context row / title-cluster term to jump to it:
+// switch page, zoom to the bounding rect, center it, pulse a red highlight for
+// 2s, then leave a thin red outline until the next selection.
+let activeHighlight = null;
+
+async function focusFinding(finding){
+  if (!finding || finding.pageNum == null || finding.pdfX == null) return;
+  if (currentPage !== finding.pageNum){
+    await selectPage(finding.pageNum);
+    // selectPage redraws overlays asynchronously; let it settle before highlighting.
+    await new Promise(r => setTimeout(r, 60));
+  }
+  await highlightRect(finding);
+}
+
+function zoomToRect(left, top, w, h){
+  const area = document.getElementById('canvasArea');
+  const z = Math.max(0.5, Math.min(3, Math.min(area.clientWidth / (w + 240), area.clientHeight / (h + 240))));
+  setZoom(z);
+  const cx = (left + w / 2) * z, cy = (top + h / 2) * z;
+  area.scrollLeft = Math.max(0, cx - area.clientWidth / 2);
+  area.scrollTop = Math.max(0, cy - area.clientHeight / 2);
+}
+
+async function highlightRect(finding){
+  const ov = document.getElementById('overlayDiv');
+  if (!pdfDoc || !ov) return;
+  const page = await pdfDoc.getPage(finding.pageNum || currentPage);
+  const vp = page.getViewport({ scale: 1 });
+  const x = finding.pdfX * SCALE, y = (vp.height - finding.pdfY) * SCALE;
+  const x2 = finding.pdfX2 * SCALE, y2 = (vp.height - finding.pdfY2) * SCALE;
+  const left = Math.min(x, x2), top = Math.min(y, y2) - 24;
+  const w = Math.max(Math.abs(x2 - x), 140), h = Math.max(Math.abs(y2 - y), 28);
+
+  if (activeHighlight && activeHighlight.parentNode) activeHighlight.parentNode.removeChild(activeHighlight);
+  const box = document.createElement('div');
+  box.className = 'focus-highlight focus-highlight-animate';
+  box.style.left = left + 'px'; box.style.top = top + 'px';
+  box.style.width = w + 'px'; box.style.height = h + 'px';
+  ov.appendChild(box);
+  activeHighlight = box;
+  setTimeout(() => {
+    box.classList.remove('focus-highlight-animate');
+    box.classList.add('focus-highlight-rest');
+  }, 2000);
+
+  zoomToRect(left, top, w, h);
+}
+
 async function runSingle(){
   if(!pageSpans[currentPage]||isRunning)return;
   document.getElementById('runStatus').textContent=`Running checks on sheet ${currentPage}...`;
@@ -864,6 +1100,7 @@ async function runSingle(){
   const result=runSpatialChecks(pageSpans[currentPage],globalGeneralNotesItems);
   const ts=pageSpans[currentPage].find(s=>/BEGIN ABUTMENT|END ABUTMENT|GIRDER ELEVATION|FRAMING PLAN|GENERAL PLAN|LANDSCAPE DETAILS|ESTIMATE OF QUANTITIES/i.test(s.text));
   result.sheet_title=ts?ts.text.trim():`Sheet ${currentPage}`;
+  stampPageNum(result,currentPage);
   pageResults[currentPage]=result;
   setPageState(currentPage,result.findings.length>0?'has-issues':'clean',result);
   renderOverlays(result.findings);showPageFindings(currentPage,result);updateSummary();
@@ -890,6 +1127,7 @@ async function runAll(){
     const result=runSpatialChecks(pageSpans[n],globalGeneralNotesItems);
     const ts=pageSpans[n].find(s=>/BEGIN ABUTMENT|END ABUTMENT|GIRDER ELEVATION|FRAMING PLAN|GENERAL PLAN|LANDSCAPE DETAILS|ESTIMATE OF QUANTITIES/i.test(s.text));
     result.sheet_title=ts?ts.text.trim():`Sheet ${n}`;
+    stampPageNum(result,n);
     pageResults[n]=result;total+=result.findings.length;
     setPageState(n,result.findings.length>0?'has-issues':'clean',result);
     appendSheetResults(n,result);updateSummary();
@@ -922,10 +1160,17 @@ function setPageState(n,state,result){
 
 function esc(t){const d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML;}
 
+// Stamp the sheet/page number onto every finding + concrete-context candidate so
+// focusFinding() can jump straight to the PDF location when a row is clicked.
+function stampPageNum(result,n){
+  (result.findings||[]).forEach(f=>f.pageNum=n);
+  (result.concreteContext||[]).forEach(c=>c.pageNum=n);
+}
+
 // Compact title-cluster + 555 classification card. Rendered above findings for
 // EVERY sheet (including skipped ones) so it's obvious whether the 555 checker
 // is running on the right sheets and why a sheet was skipped.
-function renderTitleCluster(result){
+function renderTitleCluster(result,pageN){
   const td=result.titleData;
   const rel=result.relevance;
   const relevant=!!(rel&&rel.relevant);
@@ -952,7 +1197,7 @@ function renderTitleCluster(result){
 
   const clHtml=cluster.length
     ? '<ul style="margin:3px 0 0;padding-left:15px;font-size:11px;color:var(--ink2);line-height:1.55;">'
-        +cluster.slice(0,8).map(c=>`<li>${esc(c)}</li>`).join('')+'</ul>'
+        +cluster.slice(0,15).map((c,i)=>`<li class="tc-item" data-idx="${i}">${esc(c)}</li>`).join('')+'</ul>'
     : '<div style="font-size:11px;color:var(--muted);margin-top:2px;">No title cluster extracted</div>';
 
   box.innerHTML=
@@ -965,7 +1210,42 @@ function renderTitleCluster(result){
     +lbl('Title cluster')
     +clHtml
     +lbl('Reason')
-    +`<div style="font-size:11px;font-weight:600;color:${accent};margin-top:2px;">${esc(reason)}</div>`;
+    +`<div style="font-size:11px;font-weight:600;color:${accent};margin-top:2px;">${esc(reason)}</div>`
+    +lbl('Matched term')
+    +`<div style="font-size:11px;font-weight:600;color:var(--ink2);margin-top:2px;">${esc(rel&&rel.matchedTerm?rel.matchedTerm:'none')}</div>`;
+
+  // Make each title-cluster term clickable → jump to its PDF location.
+  const cands=(td&&td.clusterCands)||[];
+  box.querySelectorAll('.tc-item').forEach(li=>{
+    const idx=+li.dataset.idx;
+    const cand=cands[idx];
+    if(pageN==null||!cand)return;
+    li.onclick=()=>focusFinding({pageNum:pageN,pdfX:cand.x,pdfY:cand.y,pdfX2:cand.x+220,pdfY2:cand.y+14});
+  });
+  return box;
+}
+
+// Right-panel card listing concrete / 555 context candidates. Each row shows the
+// concrete text, nearby structure context, nearby item number, and a status
+// (Adjacent 555 / Non-555 Only / No Item Found). Clicking a row jumps to the PDF.
+function renderConcreteContext(result,pageN){
+  const list=(result&&result.concreteContext)||[];
+  if(!list.length)return null;
+  const statusColor={'Adjacent 555':'var(--green)','Non-555 Only':'var(--amber)','No Item Found':'var(--red)'};
+  const box=document.createElement('div');
+  box.style.cssText='border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;margin-bottom:10px;background:var(--surface);';
+  box.innerHTML=`<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);">Concrete / 555 Context</div>`;
+  list.forEach(c=>{
+    const col=statusColor[c.status]||'var(--muted)';
+    const row=document.createElement('div');
+    row.className='cc-row';
+    row.style.cssText='border-top:1px solid var(--border);padding:6px 4px;margin-top:4px;cursor:pointer;border-radius:4px;';
+    row.innerHTML=`<div style="font-size:11px;font-weight:600;color:var(--ink);">${esc((c.text||'').substring(0,42))}</div>`
+      +`<div style="font-size:10px;color:var(--muted);margin-top:2px;">Structure: <strong>${esc(c.structureContext||'—')}</strong>${c.nearbyItem?` · Item: <span style="font-family:var(--mono);">${esc(c.nearbyItem)}</span>`:''}</div>`
+      +`<div style="font-size:10px;font-weight:700;color:${col};margin-top:2px;">${esc(c.status)}</div>`;
+    row.onclick=()=>focusFinding({...c,pageNum:c.pageNum!=null?c.pageNum:pageN});
+    box.appendChild(row);
+  });
   return box;
 }
 
@@ -974,7 +1254,9 @@ function showPageFindings(n,result){
   const hdr=document.createElement('div');hdr.className='sheet-group-hdr';hdr.style.cursor='default';
   hdr.innerHTML=`<span><strong>${result.sheet_type||'Unknown'}</strong> · Sheet ${n}</span><span style="color:${result.findings.length>0?'var(--red)':'var(--green)'};">${result.findings.length>0?result.findings.length+' issue(s)':'✓ Clean'}</span>`;
   document.getElementById('findingsBody').appendChild(hdr);
-  document.getElementById('findingsBody').appendChild(renderTitleCluster(result));
+  document.getElementById('findingsBody').appendChild(renderTitleCluster(result,n));
+  const ccCard=renderConcreteContext(result,n);
+  if(ccCard)document.getElementById('findingsBody').appendChild(ccCard);
   renderFindingCards(result,document.getElementById('findingsBody'),n);
 }
 
@@ -986,7 +1268,9 @@ function appendSheetResults(n,result){
   hdr.innerHTML=`<span><strong>${result.sheet_type||'Unknown'}</strong> · Sheet ${n}</span><span style="color:${result.findings.length>0?'var(--red)':'var(--green)'};">${result.findings.length>0?result.findings.length+' issue(s)':'✓ Clean'}</span>`;
   hdr.onclick=()=>{exp=!exp;wrap.style.display=exp?'block':'none';};
   grp.appendChild(hdr);grp.appendChild(wrap);
-  wrap.appendChild(renderTitleCluster(result));
+  wrap.appendChild(renderTitleCluster(result,n));
+  const ccCard=renderConcreteContext(result,n);
+  if(ccCard)wrap.appendChild(ccCard);
   renderFindingCards(result,wrap,n);body.appendChild(grp);
 }
 
@@ -995,7 +1279,7 @@ function renderFindingCards(result,container,pageN){
   (result.findings||[]).forEach((f,fi)=>{
     const col=sC[f.severity]||sC.LOW;const conf=Math.round((f.confidence||0.85)*100);
     const card=document.createElement('div');card.className='fcard';
-    if(pageN)card.onclick=()=>{selectPage(pageN);card.classList.toggle('sel');};
+    if(pageN)card.onclick=()=>{focusFinding({...f,pageNum:f.pageNum!=null?f.pageNum:pageN});card.classList.toggle('sel');};
     card.innerHTML=`<div class="fcard-accent" style="background:${col}"></div><div class="fcard-inner"><div class="fsev" style="color:${col}">${f.severity} · ${(f.type||'').replace(/_/g,' ')}</div><div class="ftitle">${f.title}</div><div class="fdesc">${f.description}</div><div class="fmeta"><div class="fmeta-cell"><div class="fmeta-key">Element</div><div class="fmeta-val" style="font-size:10px">${(f.element_detected||'—').substring(0,24)}</div></div><div class="fmeta-cell"><div class="fmeta-key">Sheet type</div><div class="fmeta-val">${f.sheet_relevance||'—'}</div></div></div>${f.evidence?`<div class="fevidence"><strong>Evidence:</strong> ${f.evidence}</div>`:''}<div class="conf-label">Confidence ${conf}% · ${f.suggested_action||''}</div><div class="ruling-bar"><button class="rbtn rbtn-valid" data-r="valid">✓ Valid issue</button><button class="rbtn rbtn-false" data-r="false_positive">✗ False positive</button><button class="rbtn rbtn-review" data-r="needs_review">? Needs engineer review</button></div></div>`;
     card.querySelectorAll('.rbtn').forEach(b=>b.addEventListener('click',e=>{
       e.stopPropagation();
