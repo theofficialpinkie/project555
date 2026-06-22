@@ -246,6 +246,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/p
 let pdfDoc=null,currentPage=1,totalPages=0;
 let pageImages={},pageSpans={},pageResults={};
 let isRunning=false;
+let globalGeneralNotesItems=new Set(); // item numbers harvested once from GENERAL NOTES sheets at load
 let decisions={}; // reviewer rulings, keyed by `${sheet}_${findingIndex}` — exported as training data
 const SCALE=1.3;
 
@@ -270,17 +271,13 @@ function isAdjacent(a,b,t=180){
 // in new categories — not by guessing upfront.
 const RULES = {
   work_element_triggers: [
-    { id: 'proposed_any',        pattern: 'PROPOSED ',          match: 'startsWith', severity: 'HIGH',   description: 'Any PROPOSED element requires an adjacent item number' },
-    { id: 'pay_limit',           pattern: 'PAY LIMIT',          match: 'contains',   severity: 'HIGH',   description: 'Pay limit boundary requires an item number callout' },
-    { id: 'concrete_table',      pattern: 'CONCRETE TABLE',     match: 'contains',   severity: 'HIGH',   description: 'Concrete table present — check all rows have item numbers' },
-    { id: 'placement_legend',    pattern: 'INDICATES CONCRETE PLACEMENT NUMBER', match: 'contains', severity: 'HIGH', description: 'Sheet has placement bubbles — verify item numbers exist' },
-    { id: 'formliner',           pattern: 'FORMLINER',          match: 'contains',   severity: 'HIGH',   description: 'Formliner / architectural treatment requires item number — verify which item with engineer' },
-    { id: 'polypanel',           pattern: 'POLYPANEL',          match: 'contains',   severity: 'HIGH',   description: 'Polypanels require item number — verify which item with engineer' },
-    { id: 'structural_steel',    pattern: 'STRUCTURAL STEEL',   match: 'contains',   severity: 'HIGH',   description: 'Structural steel element requires item number' },
-    { id: 'shear_connector',     pattern: 'SHEAR CONNECTOR',    match: 'contains',   severity: 'HIGH',   description: 'Shear connectors require item number' },
+    { id: 'footing_concrete',      pattern: 'FOOTING CONCRETE',    match: 'contains', severity: 'HIGH', description: 'Footing concrete requires item number' },
+    { id: 'concrete_structures',   pattern: 'CONCRETE FOR STRUCTURES', match: 'contains', severity: 'HIGH', description: 'Structural concrete requires item number' },
+    { id: 'pay_limit',             pattern: 'PAY LIMIT',           match: 'contains', severity: 'HIGH', description: 'Pay limit boundary requires item number' },
+    { id: 'approach_slab',         pattern: 'APPROACH SLAB',       match: 'contains', severity: 'HIGH', description: 'Approach slab requires item number' },
+    { id: 'superstructure_slab',   pattern: 'SUPERSTRUCTURE SLAB', match: 'contains', severity: 'HIGH', description: 'Superstructure slab requires item number' },
   ],
 
-  // Sheet-level checks (not element-level)
   sheet_level_checks: [
     {
       id: 'placement_bubbles_no_items',
@@ -291,12 +288,11 @@ const RULES = {
     }
   ],
 
-  // Known valid NYSDOT item numbers — anything else triggers a verify warning
   known_items: [
     '555.0011','555.0021','555.72940001',
     '556.0202','556.0205','556.03',
-    '557.1012','557.1112','557.29',
-    '558.02','559.01','559.02',
+    '557.1012','557.1112','557.29','557.30','557.1013','557.1119','557.60010004',
+    '558.02','559.01','559.02','559.03',
     '564.0501','565.2035','565.2025',
     '567.60','568.51','568.70','569.04',
     '551.11','551.13','551.15',
@@ -307,36 +303,67 @@ const RULES = {
     '206.01','207.26','207.27',
   ],
 
-  adjacency_threshold_pts: 220  // PDF points — roughly 3 inches at 72dpi
+  adjacency_threshold_pts: 220
 };
 
-// ── SHEET CLASSIFICATION: decide whether a sheet needs pay item checks ──────
-const SHEET_TYPES = [
-  { type: 'Estimate of Quantities', patterns: [/ESTIMATE OF QUANTITIES/i], checkPayItems: false },
-  { type: 'General Plan and Elevation', patterns: [/GENERAL PLAN AND ELEVATION/i], checkPayItems: true },
-  { type: 'Begin Abutment', patterns: [/BEGIN ABUTMENT/i], checkPayItems: true },
-  { type: 'End Abutment', patterns: [/END ABUTMENT/i], checkPayItems: true },
-  { type: 'Girder Elevation', patterns: [/GIRDER ELEVATION/i], checkPayItems: true },
-  { type: 'Framing Plan', patterns: [/FRAMING PLAN/i], checkPayItems: true },
-  { type: 'Transverse Section', patterns: [/TRANSVERSE SECTION/i], checkPayItems: true },
-  { type: 'Landscape Detail', patterns: [/LANDSCAPE DETAIL/i, /LAD-/i], checkPayItems: true },
-  { type: 'Railing Detail', patterns: [/RAILING/i], checkPayItems: true },
-  { type: 'Bearing Detail', patterns: [/BEARING/i], checkPayItems: true },
-  { type: 'Reinforcement Detail', patterns: [/REINFORCEMENT/i, /BAR LIST/i, /BAR BENDING/i], checkPayItems: false },
-  { type: 'Stage Construction', patterns: [/STAGE CONSTRUCTION/i], checkPayItems: true },
-  { type: 'General Notes', patterns: [/GENERAL NOTES/i], checkPayItems: false },
-  { type: 'Index / TOC', patterns: [/INDEX OF DRAWINGS/i, /TABLE OF CONTENTS/i], checkPayItems: false },
-  { type: 'Unknown', patterns: [], checkPayItems: true },
+// ── ONLY relevant sheet types for 555 pay item checks ──
+const RELEVANT_555_KEYWORDS = [
+  'FOOTING',
+  'PIER',
+  'ABUTMENT',
+  'WING WALL',
+  'RETAINING WALL',
+  'CONCRETE',
 ];
 
-function classifySheet(spans){
-  const allText=spans.map(s=>s.text).join(' ');
-  for(const st of SHEET_TYPES){
-    if(st.patterns.some(p=>p.test(allText))){
-      return st;
+const IRRELEVANT_KEYWORDS = [
+  'PILE LAYOUT',
+  'BAR LIST',
+  'REINFORCEMENT DETAIL',
+  'GENERAL NOTES',
+  'INDEX',
+  'ESTIMATE OF QUANTITIES',
+];
+
+function extractSheetTitle(spans) {
+  // Sheet titles are typically in the first 5% of spans,
+  // in the title block area, often largest text
+  // Sort by Y position (top of sheet first)
+  const topSpans = spans.slice().sort((a, b) => a.y - b.y).slice(0, 20);
+
+  // Look for patterns like "GENERAL PLAN AND ELEVATION", "FOOTING DETAIL", etc.
+  // Usually all caps, 1-5 words
+  const titleCandidates = topSpans
+    .filter(s =>
+      /^[A-Z0-9\s\-&()./]+$/.test(s.text.trim()) &&
+      s.text.trim().length > 5
+    )
+    .map(s => s.text.trim());
+
+  // Return the longest candidate (usually the most specific title)
+  return titleCandidates.length > 0
+    ? titleCandidates.sort((a, b) => b.length - a.length)[0]
+    : '';
+}
+
+function isSheet555Relevant(spans) {
+  const titleText = extractSheetTitle(spans).toUpperCase();
+
+  // Veto: irrelevant sheets first
+  for (const keyword of IRRELEVANT_KEYWORDS) {
+    if (titleText.includes(keyword.toUpperCase())) {
+      return { relevant: false, reason: `Sheet type: ${keyword}` };
     }
   }
-  return SHEET_TYPES[SHEET_TYPES.length-1]; // Unknown
+
+  // Include: only if title has 555-relevant keywords
+  for (const keyword of RELEVANT_555_KEYWORDS) {
+    if (titleText.includes(keyword.toUpperCase())) {
+      return { relevant: true, sheetType: keyword };
+    }
+  }
+
+  return { relevant: false, reason: 'Unknown sheet type' };
 }
 
 // Literal, case-insensitive matcher for RULES triggers (no regex — precise)
@@ -346,146 +373,78 @@ function matchRule(text,rule){
   return rule.match==='startsWith'?t.startsWith(p):t.includes(p);
 }
 
-function runSpatialChecks(spans){
-  const findings=[];
-  const passes=[];
-  const sheetType=classifySheet(spans);
-  const itemSpans=spans.filter(s=>/\(ITEM NO\./i.test(s.text));
+function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
+  const findings = [];
+  const passes = [];
 
-  // Skip sheets that don't require pay item checks (notes, bar list, index, EOQ)
-  if(!sheetType.checkPayItems){
+  // GATE: Is this sheet even relevant for 555?
+  const relevance = isSheet555Relevant(spans);
+  if (!relevance.relevant) {
     passes.push({
-      title:'Sheet type does not require pay item checks (notes/bar list/index).',
-      detail:`Classified as: ${sheetType.type}`
+      title: 'Sheet not checked for 555 pay items',
+      detail: relevance.reason
     });
-    return {findings,passing_checks:passes,sheet_type:sheetType.type};
+    return { findings, passing_checks: passes, sheet_type: relevance.reason };
   }
 
-  const TH=RULES.adjacency_threshold_pts;
+  const itemSpans = spans.filter(s => /\(ITEM NO\./i.test(s.text));
 
-  // ── MAIN LOOP: check every work element trigger ────────────────────────
-  const flaggedElements=new Set(); // avoid double-flagging same text
+  const TH = RULES.adjacency_threshold_pts;
+  const flaggedElements = new Set();
 
-  for(const trigger of RULES.work_element_triggers){
-    const matchingSpans=spans.filter(s=>
-      matchRule(s.text,trigger)&&!flaggedElements.has(s.text.trim())
+  // ── Check triggers (keep existing ones, just fewer) ──
+  for (const trigger of RULES.work_element_triggers) {
+    const matchingSpans = spans.filter(s =>
+      matchRule(s.text, trigger) && !flaggedElements.has(s.text.trim())
     );
 
-    for(const ms of matchingSpans){
+    for (const ms of matchingSpans) {
       flaggedElements.add(ms.text.trim());
-      const nearby=itemSpans.filter(is=>isAdjacent(ms,is,TH));
+      const nearby = itemSpans.filter(is => isAdjacent(ms, is, TH));
 
-      if(nearby.length===0){
-        const closest=itemSpans.length>0
-          ?itemSpans.sort((a,b)=>spanDist(ms,a)-spanDist(ms,b))[0]
-          :null;
+      if (nearby.length === 0) {
+        // If General Notes has ANY items, downgrade to MEDIUM
+        // If General Notes is empty, keep as HIGH
+        const severity = generalNotesItems.size > 0 ? 'MEDIUM' : 'HIGH';
 
         findings.push({
-          type:'missing_item_number',
-          severity:trigger.severity,
-          rule_id:trigger.id,
-          title:`Missing item number: "${ms.text.trim().substring(0,45)}"`,
-          description:`${trigger.description}. "${ms.text.trim()}" appears on this sheet but no (ITEM NO.) callout is within ${TH} PDF points. ${closest?'Nearest item number is '+closest.text+' at distance '+Math.round(spanDist(ms,closest))+'pts — too far to be associated.':'No item numbers found on this sheet.'}`,
-          element_detected:ms.text.trim(),
-          expected_item:null,
-          evidence:`Element at PDF coords (${Math.round(ms.x)}, ${Math.round(ms.y)}). Flagged by spatial adjacency check.`,
-          suggested_action:'Verify which item number covers this element and add it adjacent to the callout.',
-          confidence:0.90,
-          pdfX:ms.x,pdfY:ms.y,pdfX2:ms.x2+200,pdfY2:ms.y2+20
+          type: 'missing_item_number',
+          severity: severity,
+          rule_id: trigger.id,
+          title: severity === 'MEDIUM'
+            ? `Missing item number (but General Notes has items): "${ms.text.trim().substring(0, 45)}"`
+            : `Missing item number: "${ms.text.trim().substring(0, 45)}"`,
+          description: severity === 'MEDIUM'
+            ? `${trigger.description}. No adjacent callout, but General Notes sheet contains pay items — may be cross-referenced there.`
+            : `${trigger.description}. "${ms.text.trim()}" appears on this sheet but no (ITEM NO.) callout is adjacent, and no items in General Notes.`,
+          element_detected: ms.text.trim(),
+          expected_item: null,
+          evidence: `Element at PDF coords (${Math.round(ms.x)}, ${Math.round(ms.y)}).`,
+          suggested_action: severity === 'MEDIUM'
+            ? 'Check if covered by General Notes cross-reference.'
+            : 'Verify which item number covers this element and add it adjacent to the callout.',
+          confidence: severity === 'MEDIUM' ? 0.75 : 0.90,
+          pdfX: ms.x, pdfY: ms.y, pdfX2: ms.x2 + 200, pdfY2: ms.y2 + 20
         });
       } else {
         passes.push({
-          title:`${ms.text.trim().substring(0,35)} has item number`,
-          detail:`Found: ${nearby[0].text}`
+          title: `${ms.text.trim().substring(0, 35)} has item number`,
+          detail: `Found: ${nearby[0].text}`
         });
       }
     }
   }
 
-  // ── SHEET-LEVEL CHECKS (from RULES.sheet_level_checks) ─────────────────
-  for(const slc of RULES.sheet_level_checks){
-    const trig=spans.filter(s=>s.text.toUpperCase().includes(slc.trigger_text.toUpperCase()));
-    if(slc.condition==='zero_item_numbers_on_sheet'&&trig.length>0&&itemSpans.length===0){
-      findings.push({
-        type:'missing_item_number',
-        severity:slc.severity,
-        rule_id:slc.id,
-        title:'Concrete placement bubbles exist but NO item numbers on sheet',
-        description:`${slc.description}. Add a concrete table with PLACEMENT | QUANTITY | UNIT | ITEM NO. columns.`,
-        element_detected:trig[0].text.trim(),
-        expected_item:null,
-        evidence:`Legend confirms placements exist. Item numbers on sheet: 0.`,
-        suggested_action:'Verify which item number covers this element and add it adjacent to the callout.',
-        confidence:0.95,
-        pdfX:trig[0].x,pdfY:trig[0].y,pdfX2:trig[0].x+400,pdfY2:trig[0].y+20
-      });
-    }
-  }
-
-  // ── CONCRETE TABLE CHECK: table present but rows missing item numbers ──
-  // Distinct from the adjacency trigger above — both can fire on one sheet.
-  const concreteTbl=spans.filter(s=>/CONCRETE TABLE/i.test(s.text));
-  if(concreteTbl.length>0){
-    const tbl=concreteTbl[0];
-    const tblItems=itemSpans.filter(is=>Math.abs(is.x-tbl.x)<400&&Math.abs(is.y-tbl.y)<600);
-    if(tblItems.length===0){
-      findings.push({
-        type:'incomplete_table',
-        severity:'HIGH',
-        rule_id:'concrete_table_missing_items',
-        title:'Concrete table missing item numbers',
-        description:'A CONCRETE TABLE is present but no (ITEM NO.) entries found in the table region.',
-        element_detected:'CONCRETE TABLE',
-        expected_item:null,
-        evidence:`Table at (${Math.round(tbl.x)}, ${Math.round(tbl.y)})`,
-        suggested_action:'Verify which item number covers this element and add it adjacent to the callout.',
-        confidence:0.80,
-        pdfX:tbl.x,pdfY:tbl.y,pdfX2:tbl.x+300,pdfY2:tbl.y+200
-      });
-    } else {
-      passes.push({title:'Concrete table has item numbers',detail:`${tblItems.length} item ref(s) found in table region`});
-    }
-  }
-
-  // ── ITEM NUMBER VALIDATION: check against known NYSDOT catalogue ───────
-  const foundNums=itemSpans.map(s=>{
-    const m=s.text.match(/ITEM NO\.\s*([\d.]+)/i);
-    return m?m[1]:null;
-  }).filter(Boolean);
-
-  for(const num of foundNums){
-    if(!RULES.known_items.includes(num)){
-      findings.push({
-        type:'ambiguous_scope',
-        severity:'MEDIUM',
-        rule_id:'unknown_item',
-        title:`Item ${num} — verify against bid schedule`,
-        description:`Item number ${num} is not in the standard NYSDOT Section 555 catalogue. May be a contract-specific supplemental item.`,
-        element_detected:`ITEM NO. ${num}`,
-        expected_item:null,
-        evidence:'Not in standard NYSDOT item list',
-        suggested_action:`Cross-check ${num} against the Estimate of Quantities sheet`,
-        confidence:0.75,
-        pdfX:null,pdfY:null
-      });
-    } else {
-      passes.push({
-        title:`Item ${num} is a valid NYSDOT item`,
-        detail:'Matches known Section 555 catalogue'
-      });
-    }
-  }
-
   // Nothing to check
-  if(spans.filter(s=>RULES.work_element_triggers.some(t=>matchRule(s.text,t))).length===0
-     &&itemSpans.length===0){
+  if (spans.filter(s => RULES.work_element_triggers.some(t => matchRule(s.text, t))).length === 0
+     && itemSpans.length === 0) {
     passes.push({
-      title:'No pay-item elements detected on this sheet',
-      detail:'Sheet appears to be notes, schedule, bar list, or index page'
+      title: 'No pay-item elements detected on this sheet',
+      detail: 'Sheet appears to be structural steel, bearings, or notes'
     });
   }
 
-  return {findings,passing_checks:passes,sheet_type:sheetType.type};
+  return { findings, passing_checks: passes, sheet_type: relevance.sheetType };
 }
 
 document.getElementById('fileInput').addEventListener('change',e=>handleFile(e.target.files[0]));
@@ -501,9 +460,27 @@ async function handleFile(file){
   const buf=await file.arrayBuffer();
   pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
   totalPages=pdfDoc.numPages;currentPage=1;
+  // Extract general notes items once, globally (project-wide, not per-sheet)
+  globalGeneralNotesItems=await extractGeneralNotesItems(pdfDoc);
   buildPageList(file.name);
   await renderPage(1);
   document.getElementById('statusLine').textContent=`${totalPages} sheet${totalPages!==1?'s':''} loaded`;
+}
+
+// Pass 1: harvest every pay-item number that appears on any GENERAL NOTES sheet.
+async function extractGeneralNotesItems(pdfDoc){
+  const globalItems=new Set();
+  for(let pageNum=1;pageNum<=pdfDoc.numPages;pageNum++){
+    const page=await pdfDoc.getPage(pageNum);
+    const spans=await extractSpans(page);
+    // Only process GENERAL NOTES sheets
+    if(spans.some(s=>/GENERAL NOTES/i.test(s.text))){
+      const allText=spans.map(s=>s.text).join(' ');
+      const matches=allText.match(/\b(\d{3}\.\d+)\b/g)||[];
+      matches.forEach(m=>globalItems.add(m.trim()));
+    }
+  }
+  return globalItems;
 }
 
 function buildPageList(fname){
@@ -576,7 +553,7 @@ async function runSingle(){
   if(!pageSpans[currentPage]||isRunning)return;
   document.getElementById('runStatus').textContent=`Running checks on sheet ${currentPage}...`;
   setPageState(currentPage,'running');
-  const result=runSpatialChecks(pageSpans[currentPage]);
+  const result=runSpatialChecks(pageSpans[currentPage],globalGeneralNotesItems);
   const ts=pageSpans[currentPage].find(s=>/BEGIN ABUTMENT|END ABUTMENT|GIRDER ELEVATION|FRAMING PLAN|GENERAL PLAN|LANDSCAPE DETAILS|ESTIMATE OF QUANTITIES/i.test(s.text));
   result.sheet_title=ts?ts.text.trim():`Sheet ${currentPage}`;
   pageResults[currentPage]=result;
@@ -602,7 +579,7 @@ async function runAll(){
     document.getElementById('progressFill').style.width=`${Math.round(((n-1)/totalPages)*100)}%`;
     setPageState(n,'running');
     await renderPage(n);await new Promise(r=>setTimeout(r,30));
-    const result=runSpatialChecks(pageSpans[n]);
+    const result=runSpatialChecks(pageSpans[n],globalGeneralNotesItems);
     const ts=pageSpans[n].find(s=>/BEGIN ABUTMENT|END ABUTMENT|GIRDER ELEVATION|FRAMING PLAN|GENERAL PLAN|LANDSCAPE DETAILS|ESTIMATE OF QUANTITIES/i.test(s.text));
     result.sheet_title=ts?ts.text.trim():`Sheet ${n}`;
     pageResults[n]=result;total+=result.findings.length;
