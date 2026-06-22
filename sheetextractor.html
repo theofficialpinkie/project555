@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Engineering Drawing Parser · Section 555</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0; padding: 0;
+      background: #f5f5f5;
+    }
+    .header {
+      background: white;
+      border-bottom: 1px solid #ddd;
+      padding: 16px 20px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    .header p { margin: 0; font-size: 12px; color: #666; }
+    .container {
+      display: grid;
+      grid-template-columns: 300px 1fr 400px;
+      height: calc(100vh - 60px);
+      gap: 0;
+    }
+    .panel {
+      background: white;
+      border-right: 1px solid #ddd;
+      overflow-y: auto;
+      padding: 20px;
+    }
+    .panel.center {
+      border-right: 1px solid #ddd;
+      background: #f9f9f9;
+      display: flex; flex-direction: column;
+    }
+    .panel.right {
+      border-right: none;
+      background: white;
+    }
+    .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; color: #666; margin: 0 0 12px 0; }
+    .upload-area {
+      background: #f0f0f0;
+      border: 2px dashed #999;
+      border-radius: 6px;
+      padding: 16px;
+      text-align: center;
+      margin-bottom: 16px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-area:hover { background: #e8e8e8; border-color: #666; }
+    .upload-area input { display: none; }
+    .upload-area p { margin: 0; font-size: 12px; color: #666; }
+    button {
+      background: white;
+      border: 1px solid #ccc;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:hover { background: #f0f0f0; border-color: #999; }
+    button:active { transform: scale(0.98); }
+    button.primary {
+      background: #0066cc;
+      color: white;
+      border-color: #0066cc;
+    }
+    button.primary:hover { background: #0052a3; }
+    button.danger {
+      background: #dc3545;
+      color: white;
+      border-color: #dc3545;
+    }
+    button.danger:hover { background: #c82333; }
+    .page-nav {
+      display: flex; gap: 8px; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .page-nav input { width: 50px; padding: 4px 8px; font-size: 12px; }
+    .pdf-canvas {
+      flex: 1;
+      overflow: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #e0e0e0;
+    }
+    canvas { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .results-section {
+      margin-bottom: 20px;
+      background: #f9f9f9;
+      padding: 12px;
+      border-radius: 4px;
+      border-left: 3px solid #0066cc;
+    }
+    .results-section.empty {
+      color: #999;
+      font-size: 12px;
+      text-align: center;
+      padding: 20px;
+    }
+    .result-item {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .result-item.best {
+      border-color: #0066cc;
+      background: #f0f7ff;
+    }
+    .result-label {
+      font-size: 11px;
+      color: #666;
+      text-transform: uppercase;
+      margin: 0 0 4px 0;
+      font-weight: 600;
+    }
+    .result-text {
+      font-size: 14px;
+      font-weight: 500;
+      color: #000;
+      margin: 4px 0;
+      word-break: break-word;
+    }
+    .result-meta {
+      font-size: 11px;
+      color: #999;
+      margin: 4px 0 0 0;
+    }
+    .confidence-bar {
+      display: inline-block;
+      width: 100%;
+      height: 6px;
+      background: #e0e0e0;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .confidence-fill {
+      height: 100%;
+      background: #0066cc;
+      transition: width 0.3s;
+    }
+    .feedback-buttons {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .feedback-buttons button { flex: 1; min-width: 80px; font-size: 12px; }
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: white;
+      padding: 20px;
+      border-radius: 6px;
+      max-width: 500px;
+      width: 90%;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .modal h3 { margin: 0 0 12px 0; }
+    .modal input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .modal-buttons {
+      display: flex;
+      gap: 8px;
+    }
+    .modal-buttons button { flex: 1; }
+    .candidates-list {
+      background: #f9f9f9;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 12px;
+      margin-top: 8px;
+    }
+    .candidate-item {
+      font-size: 11px;
+      padding: 4px 0;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .candidate-item:last-child { border-bottom: none; }
+    .candidate-text { font-weight: 500; color: #000; }
+    .candidate-meta { color: #999; margin-left: 4px; }
+    .status-bar {
+      background: #f0f0f0;
+      border-top: 1px solid #ddd;
+      padding: 12px;
+      font-size: 11px;
+      color: #666;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .status-item { display: flex; justify-content: space-between; }
+    .experimental-label {
+      display: inline-block;
+      background: #fff3cd;
+      color: #856404;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 600;
+      margin: 4px 0 8px 0;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Engineering Drawing Parser</h1>
+    <p>Extract sheet titles and drawing titles from NYSDOT bridge plans</p>
+  </div>
+  <div id="accuracy" style="font-size: 12px; text-align: right; color: #0066cc; font-weight: 600;">
+    Accuracy: — | Pages: 0
+  </div>
+</div>
+
+<div class="container">
+  <!-- LEFT PANEL: Upload & Navigation -->
+  <div class="panel left">
+    <p class="panel-title">Upload PDF</p>
+    <div class="upload-area" id="uploadArea">
+      <input type="file" id="fileInput" accept=".pdf">
+      <p>Click to upload<br>or drag PDF here</p>
+    </div>
+    
+    <div style="margin-bottom: 20px;">
+      <p class="panel-title">Navigation</p>
+      <div class="page-nav">
+        <button id="prevBtn">← Prev</button>
+        <input type="number" id="pageInput" min="1" value="1">
+        <span style="font-size: 12px;" id="pageCount">/ —</span>
+        <button id="nextBtn">Next →</button>
+      </div>
+      <button id="runBtn" style="width: 100%; margin-top: 12px;" class="primary" disabled>
+        ▶ Extract Titles
+      </button>
+    </div>
+
+    <div style="margin-bottom: 20px;">
+      <p class="panel-title">Feedback Log</p>
+      <div style="font-size: 11px; line-height: 1.6; color: #666;">
+        <div id="feedbackStats">0 correct, 0 wrong</div>
+      </div>
+      <button id="exportBtn" style="width: 100%; margin-top: 8px;" disabled>
+        📊 Export Log
+      </button>
+    </div>
+  </div>
+
+  <!-- CENTER PANEL: PDF Viewer -->
+  <div class="panel center">
+    <div class="pdf-canvas" id="pdfCanvas">
+      <p style="color: #999;">Upload a PDF to begin</p>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL: Results & Feedback -->
+  <div class="panel right">
+    <div id="resultsContainer" style="flex: 1; overflow-y: auto;">
+      <div class="results-section empty">
+        Upload a PDF and click "Extract Titles" to get started
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-item">
+        <span>Sheet Title:</span>
+        <span id="statusTitle">—</span>
+      </div>
+      <div class="status-item">
+        <span>Drawing Titles:</span>
+        <span id="statusDrawing">—</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal for entering correct title -->
+<div class="modal" id="correctModal">
+  <div class="modal-content">
+    <h3>What is the correct sheet title?</h3>
+    <p style="font-size: 12px; color: #666; margin: 0 0 12px 0;">
+      I predicted: <strong id="predictedTitle"></strong>
+    </p>
+    <input type="text" id="correctInput" placeholder="Enter the correct sheet title">
+    <div class="modal-buttons">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" onclick="submitCorrectTitle()">Submit</button>
+    </div>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pdfDoc = null;
+let currentPage = 1;
+let pdfFileName = '';
+let pageResults = {};
+let feedbackLog = [];
+let currentPageNum = 1;
+
+const METADATA_LABEL_PATTERNS = [
+  /^DRAWING NO\.?/i,
+  /^SHEET NO\.?/i,
+  /^REGION[:\s]?/i,
+  /^COUNTY[:\s]?/i,
+  /^CONTRACT NUMBER/i,
+  /^FILE NAME/i,
+  /^USER[:\s]?/i,
+  /^DATE[\s/]?TIME/i,
+  /^SCALE/i,
+  /^DESCRIPTION OF ALTERATIONS/i,
+  /^AS[\s-]?BUILT REVISIONS/i,
+  /^ALL DIMENSIONS/i,
+  /^ALTERED BY/i,
+  /^AFFIX SEAL/i
+];
+
+const LEGAL_DISCLAIMERS = [
+  /IT IS A VIOLATION OF LAW/i,
+  /SHALL STAMP THE DOCUMENT/i,
+  /LICENSED PROFESSIONAL/i,
+  /ACTING UNDER THE DIRECTION/i,
+];
+
+const ENGINEERING_KEYWORDS = [
+  'FOOTING', 'PIER', 'ABUTMENT', 'WING', 'WALL', 'CONCRETE', 'PLAN',
+  'ELEVATION', 'SECTION', 'DETAIL', 'REBAR', 'REINFORCEMENT', 'GIRDER',
+  'BEARING', 'CULVERT', 'BOX', 'KEYWAY', 'WINGWALL', 'PILE', 'LAYOUT',
+  'SLAB', 'APPROACH', 'RETAINING', 'CROSSING', 'TRUNK', 'EBSS'
+];
+
+// ============ PDF LOADING ============
+document.getElementById('fileInput').addEventListener('change', handleFileUpload);
+document.getElementById('uploadArea').addEventListener('dragover', e => {
+  e.preventDefault();
+  document.getElementById('uploadArea').style.background = '#e0e0e0';
+});
+document.getElementById('uploadArea').addEventListener('dragleave', () => {
+  document.getElementById('uploadArea').style.background = '#f0f0f0';
+});
+document.getElementById('uploadArea').addEventListener('drop', e => {
+  e.preventDefault();
+  document.getElementById('uploadArea').style.background = '#f0f0f0';
+  const file = e.dataTransfer.files[0];
+  if (file && file.type === 'application/pdf') {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    handleFileUpload({ target: document.getElementById('fileInput') });
+  }
+});
+
+async function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  pdfFileName = file.name;
+  pageResults = {};
+  feedbackLog = [];
+  currentPage = 1;
+
+  const arrayBuffer = await file.arrayBuffer();
+  pdfDoc = await pdfjsLib.getDocument(arrayBuffer).promise;
+
+  document.getElementById('pageCount').textContent = `/ ${pdfDoc.numPages}`;
+  document.getElementById('pageInput').max = pdfDoc.numPages;
+  document.getElementById('runBtn').disabled = false;
+
+  await renderPage(1);
+}
+
+async function renderPage(pageNum) {
+  if (!pdfDoc) return;
+  currentPage = pageNum;
+  document.getElementById('pageInput').value = pageNum;
+
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale: 1.5 });
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+
+  await page.render({ canvasContext: context, viewport }).promise;
+
+  const pdfCanvas = document.getElementById('pdfCanvas');
+  pdfCanvas.innerHTML = '';
+  pdfCanvas.appendChild(canvas);
+
+  displayPageResults(pageNum);
+}
+
+document.getElementById('nextBtn').addEventListener('click', () => {
+  if (currentPage < pdfDoc.numPages) renderPage(currentPage + 1);
+});
+document.getElementById('prevBtn').addEventListener('click', () => {
+  if (currentPage > 1) renderPage(currentPage - 1);
+});
+document.getElementById('pageInput').addEventListener('change', e => {
+  const pageNum = Math.max(1, Math.min(parseInt(e.target.value) || 1, pdfDoc.numPages));
+  renderPage(pageNum);
+});
+
+// ============ EXTRACTION ============
+document.getElementById('runBtn').addEventListener('click', extractAllPages);
+
+async function extractAllPages() {
+  if (!pdfDoc) return;
+
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    await extractPage(p);
+  }
+  updateAccuracy();
+  alert(`Extraction complete! ${pdfDoc.numPages} pages processed.`);
+}
+
+async function extractPage(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  const textContent = await page.getTextContent();
+
+  // Extract all spans with coordinates
+  const spans = textContent.items
+    .filter(item => item.str && item.str.trim())
+    .map(item => ({
+      text: item.str.trim(),
+      fontSize: item.height || 12,
+      x: item.transform[4],
+      y: item.transform[5],
+      width: item.width || 0,
+      height: item.height || 0
+    }));
+
+  // Group by font size
+  const bySize = {};
+  spans.forEach(s => {
+    const size = Math.round(s.fontSize * 2) / 2;
+    if (!bySize[size]) bySize[size] = [];
+    bySize[size].push(s);
+  });
+
+  const sizes = Object.keys(bySize)
+    .map(Number)
+    .sort((a, b) => b - a)
+    .slice(0, 3);
+
+  // Collect ALL candidates from top 3 tiers
+  let allCandidates = [];
+  for (let tierIdx = 0; tierIdx < sizes.length; tierIdx++) {
+    const sizeKey = sizes[tierIdx];
+    const tierCandidates = bySize[sizeKey]
+      .filter(s => isValidCandidate(s.text))
+      .map(s => ({
+        ...s,
+        tier: tierIdx,
+        tierSize: sizeKey,
+        score: scoreCandidate(s.text, s.x, s.y, tierIdx)
+      }));
+    allCandidates = allCandidates.concat(tierCandidates);
+  }
+
+  // Sort ALL candidates by score (best overall wins, regardless of tier)
+  allCandidates.sort((a, b) => b.score - a.score);
+
+  // Best sheet title is highest score overall
+  const sheetTitleCandidate = allCandidates.length > 0 ? allCandidates[0] : null;
+  const sheetCandidates = allCandidates.slice(0, 5);
+
+  // Drawing titles: candidates from tier 2 (next font size down)
+  const drawingTitles = allCandidates
+    .filter(c => c.tier === 1)
+    .slice(0, 5);
+
+  pageResults[pageNum] = {
+    sheetTitle: sheetTitleCandidate,
+    sheetCandidates: sheetCandidates,
+    drawingTitles: drawingTitles,
+    span: spans
+  };
+}
+
+function isMetadataLabel(text) {
+  const upperText = text.toUpperCase().trim();
+  return METADATA_LABEL_PATTERNS.some(pattern => pattern.test(upperText));
+}
+
+function isValidCandidate(text) {
+  if (!text || text.length < 3 || text.length > 200) return false;
+  if (/^\d+$/.test(text)) return false; // Pure numbers
+  if ((text.match(/,/g) || []).length >= 3) return false; // Likely a sentence
+
+  // Block exact metadata labels only
+  if (isMetadataLabel(text)) return false;
+
+  // Block legal disclaimers
+  for (const regex of LEGAL_DISCLAIMERS) {
+    if (regex.test(text)) return false;
+  }
+
+  return true;
+}
+
+function scoreCandidate(text, x, y, tierIdx) {
+  let score = 0;
+
+  // Tier penalty
+  score -= tierIdx * 30;
+
+  // All caps bonus
+  if (/^[A-Z\d\s\-&().,/]+$/.test(text)) score += 50;
+
+  // Engineering keywords
+  const upperText = text.toUpperCase();
+  let keywordCount = 0;
+  for (const kw of ENGINEERING_KEYWORDS) {
+    if (upperText.includes(kw)) {
+      score += 80;
+      keywordCount++;
+    }
+  }
+
+  // Length score (2-8 words preferred)
+  const wordCount = text.split(/\s+/).length;
+  if (wordCount >= 2 && wordCount <= 8) score += 40;
+  else if (wordCount > 12) score -= 30;
+
+  // Not too long
+  if (text.length > 100) score -= 20;
+
+  // Position near title block (rough: lower-right area)
+  if (x > 300 && y > 300) score += 30;
+
+  // Multiple keywords boost
+  if (keywordCount >= 2) score += 50;
+
+  return Math.round(score);
+}
+
+function displayPageResults(pageNum) {
+  const result = pageResults[pageNum];
+  const container = document.getElementById('resultsContainer');
+
+  if (!result) {
+    container.innerHTML = '<div class="results-section empty">No extraction for this page yet</div>';
+    document.getElementById('statusTitle').textContent = '—';
+    document.getElementById('statusDrawing').textContent = '—';
+    return;
+  }
+
+  let html = '';
+
+  // Sheet title section
+  html += '<div class="results-section">';
+  html += '<p class="result-label">Sheet Title Extraction</p>';
+
+  if (result.sheetTitle) {
+    const best = result.sheetTitle;
+    const tierName = ['Tier 1', 'Tier 2', 'Tier 3'][best.tier] || 'Unknown';
+    html += `<div class="result-item best">
+      <div class="result-label">Best Guess</div>
+      <div class="result-text">${escapeHtml(best.text)}</div>
+      <div class="result-meta">
+        ${tierName} | Font: ${best.fontSize.toFixed(1)}pt | Score: ${best.score} | 
+        Pos: (${Math.round(best.x)}, ${Math.round(best.y)})
+      </div>
+      <div class="confidence-bar">
+        <div class="confidence-fill" style="width: ${Math.min(100, (best.score + 100) / 2)}%"></div>
+      </div>
+    </div>`;
+
+    if (result.sheetCandidates.length > 1) {
+      html += '<div class="candidates-list">';
+      html += '<div style="font-size: 11px; font-weight: 600; margin-bottom: 6px; color: #666;">Other candidates:</div>';
+      result.sheetCandidates.slice(1, 5).forEach(c => {
+        const cTierName = ['Tier 1', 'Tier 2', 'Tier 3'][c.tier] || 'Unknown';
+        html += `<div class="candidate-item">
+          <span class="candidate-text">${escapeHtml(c.text)}</span>
+          <span class="candidate-meta">(${cTierName}, ${c.fontSize.toFixed(1)}pt, score: ${c.score})</span>
+        </div>`;
+      });
+      html += '</div>';
+    }
+
+    html += `<div class="feedback-buttons">
+      <button onclick="submitFeedback(${pageNum}, 'correct')" class="primary">✓ Correct</button>
+      <button onclick="submitFeedback(${pageNum}, 'wrong')" class="danger">✗ Wrong</button>
+      <button onclick="openCorrectionModal(${pageNum}, '${escapeHtml(best.text)}')">📝 Correct</button>
+    </div>`;
+  } else {
+    html += '<div class="result-item" style="color: #999;">No valid candidates found</div>';
+  }
+  html += '</div>';
+
+  // Drawing titles section (experimental)
+  if (result.drawingTitles && result.drawingTitles.length > 0) {
+    html += '<div class="results-section">';
+    html += '<p class="result-label">Drawing Titles <span class="experimental-label">Experimental</span></p>';
+    result.drawingTitles.slice(0, 5).forEach(dt => {
+      html += `<div class="result-item">
+        <div class="result-text">${escapeHtml(dt.text)}</div>
+        <div class="result-meta">
+          Font: ${dt.fontSize.toFixed(1)}pt | Score: ${dt.score} | 
+          Pos: (${Math.round(dt.x)}, ${Math.round(dt.y)})
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+
+  // Update status bar
+  if (result.sheetTitle) {
+    document.getElementById('statusTitle').textContent = result.sheetTitle.text.substring(0, 40);
+    const drawingCount = result.drawingTitles ? result.drawingTitles.length : 0;
+    document.getElementById('statusDrawing').textContent = `${drawingCount} found`;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ============ FEEDBACK ============
+function submitFeedback(pageNum, feedback) {
+  const result = pageResults[pageNum];
+  if (!result || !result.sheetTitle) return;
+
+  const prediction = result.sheetTitle.text;
+  feedbackLog.push({
+    pageNum,
+    pdfName: pdfFileName,
+    predicted: prediction,
+    actual: feedback === 'correct' ? prediction : null,
+    feedback,
+    confidence: result.sheetTitle.score,
+    timestamp: new Date().toISOString()
+  });
+
+  updateAccuracy();
+  alert(`Feedback logged: ${feedback}`);
+}
+
+function openCorrectionModal(pageNum, predicted) {
+  document.getElementById('predictedTitle').textContent = predicted;
+  document.getElementById('correctInput').value = '';
+  document.getElementById('correctInput').focus();
+  document.getElementById('correctModal').classList.add('active');
+  window.currentCorrectionPage = pageNum;
+}
+
+function closeModal() {
+  document.getElementById('correctModal').classList.remove('active');
+}
+
+function submitCorrectTitle() {
+  const correctTitle = document.getElementById('correctInput').value.trim();
+  if (!correctTitle) return;
+
+  const pageNum = window.currentCorrectionPage;
+  const result = pageResults[pageNum];
+  const prediction = result.sheetTitle.text;
+
+  feedbackLog.push({
+    pageNum,
+    pdfName: pdfFileName,
+    predicted: prediction,
+    actual: correctTitle,
+    feedback: 'corrected',
+    confidence: result.sheetTitle.score,
+    timestamp: new Date().toISOString()
+  });
+
+  updateAccuracy();
+  closeModal();
+  alert('Correction logged. This will help improve extraction.');
+}
+
+function updateAccuracy() {
+  const total = feedbackLog.length;
+  const correct = feedbackLog.filter(f => f.feedback === 'correct').length;
+  const corrected = feedbackLog.filter(f => f.actual && f.feedback === 'corrected').length;
+
+  const accuracy = total > 0 ? Math.round((correct / total) * 100) : 0;
+  document.getElementById('accuracy').textContent = `Accuracy: ${accuracy}% | Pages: ${Object.keys(pageResults).length}`;
+  document.getElementById('feedbackStats').textContent = `${correct} correct, ${feedbackLog.filter(f => f.feedback === 'wrong').length} wrong, ${corrected} corrected`;
+  document.getElementById('exportBtn').disabled = feedbackLog.length === 0;
+}
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const json = JSON.stringify(feedbackLog, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `feedback_${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Close modal on outside click
+document.getElementById('correctModal').addEventListener('click', e => {
+  if (e.target.id === 'correctModal') closeModal();
+});
+
+// Allow Enter to submit correction
+document.getElementById('correctInput').addEventListener('keypress', e => {
+  if (e.key === 'Enter') submitCorrectTitle();
+});
+</script>
+
+</body>
+</html>
