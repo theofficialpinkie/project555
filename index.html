@@ -279,7 +279,7 @@ document.getElementById('toggleDebug').addEventListener('click', () => {
 
 async function extractSpans(pdfPage){
   const c=await pdfPage.getTextContent();
-  return c.items.map(i=>({text:i.str,x:i.transform[4],y:i.transform[5],x2:i.transform[4]+(i.width||0),y2:i.transform[5]+(i.height||12)})).filter(s=>s.text.trim());
+  return c.items.map(i=>({text:i.str,x:i.transform[4],y:i.transform[5],x2:i.transform[4]+(i.width||0),y2:i.transform[5]+(i.height||12),width:i.width||0,height:i.height||0,fontSize:i.height||12})).filter(s=>s.text.trim());
 }
 
 function spanDist(a,b){
@@ -333,94 +333,169 @@ const RULES = {
   adjacency_threshold_pts: 220
 };
 
-// ── ONLY relevant sheet types for 555 pay item checks ──
-const RELEVANT_555_KEYWORDS = [
-  'FOOTING',
-  'PIER',
-  'ABUTMENT',
-  'WING WALL',
-  'RETAINING WALL',
-  'CONCRETE',
+// ════════════════════════════════════════════════════════════════════════
+// TITLE EXTRACTION — ported from Sheetextractor.html (Engineering Drawing
+// Parser). The old extractSheetTitle() that anchored around DRAWING NO. /
+// SHEET NO. was deleted: it kept selecting metadata labels as the title.
+//
+// Instead of betting on one fragile "sheet title", we build a page-level
+// titleCluster (best title + top sheet candidates + drawing-title candidates
+// + high-scoring title-like text from the top font-size tiers) and let the
+// 555 classifier scan the whole cluster. The cluster only needs to *contain*
+// a term like WINGWALL / FOOTING for the sheet to be relevant — we don't need
+// perfect sheet-vs-drawing title separation for Section 555.
+// ════════════════════════════════════════════════════════════════════════
+
+// Exact-label metadata that is never a real title (title-block field labels).
+const METADATA_LABEL_PATTERNS = [
+  /^DRAWING NO\.?/i,
+  /^SHEET NO\.?/i,
+  /^REGION[:\s]?/i,
+  /^COUNTY[:\s]?/i,
+  /^CONTRACT NUMBER/i,
+  /^FILE NAME/i,
+  /^USER[:\s]?/i,
+  /^DATE[\s/]?TIME/i,
+  /^SCALE/i,
+  /^DESCRIPTION OF ALTERATIONS/i,
+  /^AS[\s-]?BUILT REVISIONS/i,
+  /^ALL DIMENSIONS/i,
+  /^ALTERED BY/i,
+  /^AFFIX SEAL/i
 ];
 
-const IRRELEVANT_KEYWORDS = [
-  'PILE LAYOUT',
-  'BAR LIST',
-  'REINFORCEMENT DETAIL',
-  'GENERAL NOTES',
-  'INDEX',
-  'ESTIMATE OF QUANTITIES',
+const LEGAL_DISCLAIMERS = [
+  /IT IS A VIOLATION OF LAW/i,
+  /SHALL STAMP THE DOCUMENT/i,
+  /LICENSED PROFESSIONAL/i,
+  /ACTING UNDER THE DIRECTION/i,
 ];
 
-function extractSheetTitle(spans) {
-  // Anchor to DRAWING NO. or SHEET NO. (always present on engineering drawings)
-  const anchor = spans.find(s => /DRAWING NO|SHEET NO/i.test(s.text));
+const ENGINEERING_KEYWORDS = [
+  'FOOTING', 'PIER', 'ABUTMENT', 'WING', 'WALL', 'CONCRETE', 'PLAN',
+  'ELEVATION', 'SECTION', 'DETAIL', 'REBAR', 'REINFORCEMENT', 'GIRDER',
+  'BEARING', 'CULVERT', 'BOX', 'KEYWAY', 'WINGWALL', 'PILE', 'LAYOUT',
+  'SLAB', 'APPROACH', 'RETAINING', 'CROSSING', 'TRUNK', 'EBSS'
+];
 
-  if (!anchor) {
-    addDebug(`[extractSheetTitle] No DRAWING NO./SHEET NO. anchor found`);
-    return '';
-  }
-
-  addDebug(`[extractSheetTitle] Anchor found at Y=${Math.round(anchor.y)}`);
-
-  // Look for title candidates NEAR the anchor (within 150 Y units)
-  const titleKeywords = [
-    'DETAIL', 'PLAN', 'ELEVATION', 'FOOTING', 'ABUTMENT',
-    'PIER', 'WING', 'CONCRETE', 'LAYOUT', 'SECTION',
-    'CROSSING', 'TRUNK', 'SLAB', 'BEARING', 'RAILING',
-    'GIRDER', 'FRAMING', 'TRANSVERSE'
-  ];
-
-  const candidates = spans.filter(s => {
-    const nearAnchor = Math.abs(s.y - anchor.y) < 150;
-    const isLengthOk = s.text.length > 5 && s.text.length < 100;
-    const hasTitle = titleKeywords.some(kw => s.text.toUpperCase().includes(kw));
-
-    return nearAnchor && isLengthOk && hasTitle;
-  });
-
-  addDebug(`[extractSheetTitle] ${candidates.length} title candidates near anchor`);
-  candidates.slice(0, 3).forEach((c, i) => {
-    addDebug(`  [${i}] "${c.text}"`);
-  });
-
-  if (candidates.length > 0) {
-    const title = candidates[0].text.trim().substring(0, 80);
-    addDebug(`[extractSheetTitle] SELECTED: "${title}"`);
-    return title;
-  }
-
-  addDebug(`[extractSheetTitle] No title found`);
-  return '';
+function isMetadataLabel(text) {
+  const t = text.toUpperCase().trim();
+  return METADATA_LABEL_PATTERNS.some(p => p.test(t));
 }
 
-function isSheet555Relevant(spans) {
-  const titleText = extractSheetTitle(spans).toUpperCase();
-  addDebug(`[isSheet555Relevant] Processing title: "${titleText}"`);
+function isValidCandidate(text) {
+  if (!text || text.length < 3 || text.length > 200) return false;
+  if (/^\d+$/.test(text)) return false;                 // pure numbers
+  if ((text.match(/,/g) || []).length >= 3) return false; // likely a sentence
+  if (isMetadataLabel(text)) return false;
+  for (const regex of LEGAL_DISCLAIMERS) if (regex.test(text)) return false;
+  return true;
+}
 
-  if (!titleText) {
-    addDebug(`[isSheet555Relevant] → SKIP (no title)`);
-    return { relevant: false, reason: 'Unable to extract title' };
+function scoreCandidate(text, x, y, tierIdx) {
+  let score = 0;
+  score -= tierIdx * 30;                                  // tier penalty
+  if (/^[A-Z\d\s\-&().,/]+$/.test(text)) score += 50;     // all-caps bonus
+  const upper = text.toUpperCase();
+  let kwCount = 0;
+  for (const kw of ENGINEERING_KEYWORDS) {
+    if (upper.includes(kw)) { score += 80; kwCount++; }
   }
+  const words = text.split(/\s+/).length;
+  if (words >= 2 && words <= 8) score += 40;
+  else if (words > 12) score -= 30;
+  if (text.length > 100) score -= 20;
+  if (x > 300 && y > 300) score += 30;                    // near title block
+  if (kwCount >= 2) score += 50;
+  return Math.round(score);
+}
 
-  // Check veto list
-  for (const keyword of IRRELEVANT_KEYWORDS) {
-    if (titleText.includes(keyword.toUpperCase())) {
-      addDebug(`[isSheet555Relevant] → SKIP (veto: ${keyword})`);
-      return { relevant: false, reason: `Veto: ${keyword}` };
-    }
+// Build the page-level title cluster. Returns:
+//   { bestTitle, titleCluster[], titleClusterText, sheetCandidates[], drawingTitleCandidates[] }
+function extractTitleData(spans) {
+  // Group valid candidates by (rounded) font size.
+  const bySize = {};
+  spans.forEach(s => {
+    if (!isValidCandidate(s.text)) return;
+    const size = Math.round((s.fontSize || 12) * 2) / 2;
+    (bySize[size] = bySize[size] || []).push(s);
+  });
+
+  const sizes = Object.keys(bySize).map(Number).sort((a, b) => b - a).slice(0, 3);
+
+  // Score candidates from the top 3 font-size tiers.
+  let all = [];
+  for (let tierIdx = 0; tierIdx < sizes.length; tierIdx++) {
+    const sizeKey = sizes[tierIdx];
+    const tierCands = bySize[sizeKey].map(s => ({
+      text: s.text.trim(),
+      fontSize: s.fontSize || 12,
+      x: s.x, y: s.y,
+      tier: tierIdx,
+      tierSize: sizeKey,
+      score: scoreCandidate(s.text.trim(), s.x, s.y, tierIdx)
+    }));
+    all = all.concat(tierCands);
   }
+  all.sort((a, b) => b.score - a.score);
 
-  // Check relevance keywords
-  for (const keyword of RELEVANT_555_KEYWORDS) {
-    if (titleText.includes(keyword.toUpperCase())) {
-      addDebug(`[isSheet555Relevant] → RELEVANT (matched: ${keyword})`);
-      return { relevant: true, sheetType: keyword };
-    }
-  }
+  const bestCand = all[0] || null;
+  const sheetCandidates = all.slice(0, 5);
+  const drawingTitleCandidates = all.filter(c => c.tier === 1).slice(0, 5);
 
-  addDebug(`[isSheet555Relevant] → SKIP (unknown sheet)`);
-  return { relevant: false, reason: `Unknown: ${titleText.substring(0, 30)}` };
+  // Assemble the cluster (deduped, order-preserving): best title, top sheet
+  // candidates, drawing-title candidates, and any high-scoring title-like text.
+  const cluster = [];
+  const seen = new Set();
+  const add = c => {
+    if (!c) return;
+    const key = c.text.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    cluster.push(c.text);
+  };
+  add(bestCand);
+  sheetCandidates.forEach(add);
+  drawingTitleCandidates.forEach(add);
+  all.filter(c => c.score >= 80).forEach(add);
+
+  const data = {
+    bestTitle: bestCand ? bestCand.text : '',
+    titleCluster: cluster,
+    titleClusterText: cluster.join(' | '),
+    sheetCandidates,
+    drawingTitleCandidates
+  };
+
+  addDebug(`[extractTitleData] best="${data.bestTitle}" · ${cluster.length} cluster term(s)`);
+  return data;
+}
+
+// 555 relevance from the WHOLE title cluster (not a single fragile title).
+// Veto first, then relevance keywords.
+function isSheet555RelevantFromTitleCluster(titleData) {
+  const text = (titleData.titleClusterText || '').toUpperCase();
+  addDebug(`[is555] cluster="${text.substring(0, 80)}"`);
+
+  if (!text) return { relevant: false, reason: 'No title cluster extracted' };
+
+  // Veto list (sheets that are not 555 pay-item sheets).
+  if (text.includes('PILE LAYOUT'))           return { relevant: false, reason: 'Veto: PILE LAYOUT' };
+  if (text.includes('BAR LIST'))              return { relevant: false, reason: 'Veto: BAR LIST' };
+  if (text.includes('REINFORCEMENT DETAIL'))  return { relevant: false, reason: 'Veto: REINFORCEMENT DETAIL' };
+  if (text.includes('GENERAL NOTES'))         return { relevant: false, reason: 'Veto: GENERAL NOTES' };
+  if (text.includes('ESTIMATE OF QUANTITIES'))return { relevant: false, reason: 'Veto: ESTIMATE OF QUANTITIES' };
+  if (text.includes('INDEX'))                 return { relevant: false, reason: 'Veto: INDEX' };
+
+  // Relevance keywords.
+  if (text.includes('FOOTING'))                                  return { relevant: true, sheetType: 'FOOTING' };
+  if (text.includes('PIER'))                                     return { relevant: true, sheetType: 'PIER' };
+  if (text.includes('ABUTMENT'))                                 return { relevant: true, sheetType: 'ABUTMENT' };
+  if (text.includes('WINGWALL') || text.includes('WING WALL'))   return { relevant: true, sheetType: 'WINGWALL' };
+  if (text.includes('RETAINING WALL'))                           return { relevant: true, sheetType: 'RETAINING WALL' };
+  if (text.includes('CONCRETE'))                                 return { relevant: true, sheetType: 'CONCRETE' };
+
+  return { relevant: false, reason: `Unknown title cluster: ${text.substring(0, 30)}` };
 }
 
 // Literal, case-insensitive matcher for RULES triggers (no regex — precise)
@@ -434,14 +509,18 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
   const findings = [];
   const passes = [];
 
-  // GATE: Is this sheet even relevant for 555?
-  const relevance = isSheet555Relevant(spans);
+  // Build the page-level title cluster, then gate on it.
+  const titleData = extractTitleData(spans);
+  const relevance = isSheet555RelevantFromTitleCluster(titleData);
+
+  // GATE: Is this sheet even relevant for 555? If not, return clean/skipped but
+  // still carry titleData so the UI can show the cluster + why it was skipped.
   if (!relevance.relevant) {
     passes.push({
       title: 'Sheet not checked for 555 pay items',
       detail: relevance.reason
     });
-    return { findings, passing_checks: passes, sheet_type: relevance.reason };
+    return { findings, passing_checks: passes, sheet_type: relevance.reason, titleData, relevance };
   }
 
   const itemSpans = spans.filter(s => /\(ITEM NO\./i.test(s.text));
@@ -475,12 +554,14 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
             ? `${trigger.description}. No adjacent callout, but General Notes sheet contains pay items — may be cross-referenced there.`
             : `${trigger.description}. "${ms.text.trim()}" appears on this sheet but no (ITEM NO.) callout is adjacent, and no items in General Notes.`,
           element_detected: ms.text.trim(),
-          expected_item: null,
           evidence: `Element at PDF coords (${Math.round(ms.x)}, ${Math.round(ms.y)}).`,
           suggested_action: severity === 'MEDIUM'
             ? 'Check if covered by General Notes cross-reference.'
             : 'Verify which item number covers this element and add it adjacent to the callout.',
           confidence: severity === 'MEDIUM' ? 0.75 : 0.90,
+          sheet_relevance: relevance.sheetType,
+          sheet_title: titleData.bestTitle,
+          drawing_title: (titleData.drawingTitleCandidates[0] && titleData.drawingTitleCandidates[0].text) || '',
           pdfX: ms.x, pdfY: ms.y, pdfX2: ms.x2 + 200, pdfY2: ms.y2 + 20
         });
       } else {
@@ -501,7 +582,7 @@ function runSpatialChecks(spans, generalNotesItems = globalGeneralNotesItems) {
     });
   }
 
-  return { findings, passing_checks: passes, sheet_type: relevance.sheetType };
+  return { findings, passing_checks: passes, sheet_type: relevance.sheetType, titleData, relevance };
 }
 
 document.getElementById('fileInput').addEventListener('change',e=>handleFile(e.target.files[0]));
@@ -557,7 +638,30 @@ async function selectPage(n){
   document.getElementById(`pg_${n}`)?.classList.add('active');
   await renderPage(n);
   if(pageResults[n]){renderOverlays(pageResults[n].findings);showPageFindings(n,pageResults[n]);}
-  else document.getElementById('overlayDiv').innerHTML='';
+  else{
+    document.getElementById('overlayDiv').innerHTML='';
+    showClusterPreview(n);
+  }
+}
+
+// Preview the title cluster + 555 classification for a sheet that hasn't been
+// reviewed yet, so you can browse sheets and see which ones the checker will run
+// on without a full review. Reuses the same renderTitleCluster card.
+function showClusterPreview(n){
+  const spans=pageSpans[n];
+  if(!spans)return;
+  const titleData=extractTitleData(spans);
+  const relevance=isSheet555RelevantFromTitleCluster(titleData);
+  const body=document.getElementById('findingsBody');
+  body.innerHTML='';
+  const hdr=document.createElement('div');hdr.className='sheet-group-hdr';hdr.style.cursor='default';
+  hdr.innerHTML=`<span><strong>Sheet ${n}</strong> · not reviewed</span><span style="color:var(--muted);">preview</span>`;
+  body.appendChild(hdr);
+  body.appendChild(renderTitleCluster({titleData,relevance}));
+  const note=document.createElement('div');
+  note.style.cssText='font-size:11px;color:var(--muted);text-align:center;padding:10px;line-height:1.5;';
+  note.textContent='Click "Review this sheet" to run the 555 checks.';
+  body.appendChild(note);
 }
 
 async function renderPage(n){
@@ -671,16 +775,65 @@ function setPageState(n,state,result){
   }
 }
 
+function esc(t){const d=document.createElement('div');d.textContent=t==null?'':t;return d.innerHTML;}
+
+// Compact title-cluster + 555 classification card. Rendered above findings for
+// EVERY sheet (including skipped ones) so it's obvious whether the 555 checker
+// is running on the right sheets and why a sheet was skipped.
+function renderTitleCluster(result){
+  const td=result.titleData;
+  const rel=result.relevance;
+  const relevant=!!(rel&&rel.relevant);
+
+  // Accent the whole card green (relevant) or grey (skipped).
+  const accent=relevant?'var(--green)':'var(--muted)';
+  const tint=relevant?'var(--green-light)':'var(--bg)';
+
+  const box=document.createElement('div');
+  box.style.cssText=`border:1px solid var(--border);border-left:3px solid ${accent};border-radius:var(--radius);padding:8px 10px;margin-bottom:10px;background:${tint};`;
+
+  const lbl=t=>`<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-top:6px;">${t}</div>`;
+
+  const best=td&&td.bestTitle?td.bestTitle:'—';
+  const cluster=(td&&td.titleCluster&&td.titleCluster.length)?td.titleCluster:[];
+
+  // Classification badge: Relevant / Skipped.
+  const badgeBg=relevant?'var(--green-light)':'#e6e8ee';
+  const badgeTxt=relevant?'RELEVANT':'SKIPPED';
+  const badge=`<span style="display:inline-block;font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 7px;border-radius:20px;background:${badgeBg};color:${accent};">${badgeTxt}</span>`;
+
+  // Reason line: sheet type when relevant, veto/unknown reason when skipped.
+  const reason=relevant?(rel.sheetType||'—'):(rel&&rel.reason?rel.reason:'Unknown');
+
+  const clHtml=cluster.length
+    ? '<ul style="margin:3px 0 0;padding-left:15px;font-size:11px;color:var(--ink2);line-height:1.55;">'
+        +cluster.slice(0,8).map(c=>`<li>${esc(c)}</li>`).join('')+'</ul>'
+    : '<div style="font-size:11px;color:var(--muted);margin-top:2px;">No title cluster extracted</div>';
+
+  box.innerHTML=
+    `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">`
+      +`<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);">555 Classification</div>`
+      +badge
+    +`</div>`
+    +lbl('Best title')
+    +`<div style="font-size:12px;font-weight:600;color:var(--ink);margin-top:2px;">${esc(best)}</div>`
+    +lbl('Title cluster')
+    +clHtml
+    +lbl('Reason')
+    +`<div style="font-size:11px;font-weight:600;color:${accent};margin-top:2px;">${esc(reason)}</div>`;
+  return box;
+}
+
 function showPageFindings(n,result){
   document.getElementById('findingsBody').innerHTML='';
   const hdr=document.createElement('div');hdr.className='sheet-group-hdr';hdr.style.cursor='default';
   hdr.innerHTML=`<span><strong>${result.sheet_type||'Unknown'}</strong> · Sheet ${n}</span><span style="color:${result.findings.length>0?'var(--red)':'var(--green)'};">${result.findings.length>0?result.findings.length+' issue(s)':'✓ Clean'}</span>`;
   document.getElementById('findingsBody').appendChild(hdr);
+  document.getElementById('findingsBody').appendChild(renderTitleCluster(result));
   renderFindingCards(result,document.getElementById('findingsBody'),n);
 }
 
 function appendSheetResults(n,result){
-  if(!result.findings.length&&!result.passing_checks.length)return;
   const body=document.getElementById('findingsBody');
   const grp=document.createElement('div');grp.className='sheet-group';
   let exp=true;const wrap=document.createElement('div');
@@ -688,6 +841,7 @@ function appendSheetResults(n,result){
   hdr.innerHTML=`<span><strong>${result.sheet_type||'Unknown'}</strong> · Sheet ${n}</span><span style="color:${result.findings.length>0?'var(--red)':'var(--green)'};">${result.findings.length>0?result.findings.length+' issue(s)':'✓ Clean'}</span>`;
   hdr.onclick=()=>{exp=!exp;wrap.style.display=exp?'block':'none';};
   grp.appendChild(hdr);grp.appendChild(wrap);
+  wrap.appendChild(renderTitleCluster(result));
   renderFindingCards(result,wrap,n);body.appendChild(grp);
 }
 
@@ -697,7 +851,7 @@ function renderFindingCards(result,container,pageN){
     const col=sC[f.severity]||sC.LOW;const conf=Math.round((f.confidence||0.85)*100);
     const card=document.createElement('div');card.className='fcard';
     if(pageN)card.onclick=()=>{selectPage(pageN);card.classList.toggle('sel');};
-    card.innerHTML=`<div class="fcard-accent" style="background:${col}"></div><div class="fcard-inner"><div class="fsev" style="color:${col}">${f.severity} · ${(f.type||'').replace(/_/g,' ')}</div><div class="ftitle">${f.title}</div><div class="fdesc">${f.description}</div><div class="fmeta"><div class="fmeta-cell"><div class="fmeta-key">Element</div><div class="fmeta-val" style="font-size:10px">${(f.element_detected||'—').substring(0,24)}</div></div><div class="fmeta-cell"><div class="fmeta-key">Expected item</div><div class="fmeta-val">${f.expected_item||'verify w/ engineer'}</div></div></div>${f.evidence?`<div class="fevidence"><strong>Evidence:</strong> ${f.evidence}</div>`:''}<div class="conf-label">Confidence ${conf}% · ${f.suggested_action||''}</div><div class="ruling-bar"><button class="rbtn rbtn-valid" data-r="valid">✓ Valid issue</button><button class="rbtn rbtn-false" data-r="false_positive">✗ False positive</button><button class="rbtn rbtn-review" data-r="needs_review">? Needs engineer review</button></div></div>`;
+    card.innerHTML=`<div class="fcard-accent" style="background:${col}"></div><div class="fcard-inner"><div class="fsev" style="color:${col}">${f.severity} · ${(f.type||'').replace(/_/g,' ')}</div><div class="ftitle">${f.title}</div><div class="fdesc">${f.description}</div><div class="fmeta"><div class="fmeta-cell"><div class="fmeta-key">Element</div><div class="fmeta-val" style="font-size:10px">${(f.element_detected||'—').substring(0,24)}</div></div><div class="fmeta-cell"><div class="fmeta-key">Sheet type</div><div class="fmeta-val">${f.sheet_relevance||'—'}</div></div></div>${f.evidence?`<div class="fevidence"><strong>Evidence:</strong> ${f.evidence}</div>`:''}<div class="conf-label">Confidence ${conf}% · ${f.suggested_action||''}</div><div class="ruling-bar"><button class="rbtn rbtn-valid" data-r="valid">✓ Valid issue</button><button class="rbtn rbtn-false" data-r="false_positive">✗ False positive</button><button class="rbtn rbtn-review" data-r="needs_review">? Needs engineer review</button></div></div>`;
     card.querySelectorAll('.rbtn').forEach(b=>b.addEventListener('click',e=>{
       e.stopPropagation();
       setRuling(pageN,fi,b.dataset.r,f,result.sheet_title||result.sheet_type,card);
