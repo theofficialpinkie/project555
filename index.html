@@ -153,7 +153,12 @@ canvas{border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.12);display:block;}
   <div class="logo"><em>Plan</em>Review</div>
   <span class="chip">Pay Item Checker · Section 555 · NYSDOT</span>
   <button class="btn export-btn" id="exportBtn" onclick="exportDecisions()">⬇ Export decisions (JSON)</button>
+  <button class="btn" id="toggleDebug" style="font-size:10px;">🐛 Debug</button>
   <span class="status-line" id="statusLine">Upload a plan to begin</span>
+</div>
+
+<div id="debugPanel" style="display:none;background:#f5f5f5;border-bottom:1px solid #ddd;padding:12px 20px;font-size:11px;font-family:monospace;color:#333;max-height:80px;overflow-y:auto;">
+  <div id="debugOutput"></div>
 </div>
 
 <div class="shell">
@@ -250,6 +255,28 @@ let globalGeneralNotesItems=new Set(); // item numbers harvested once from GENER
 let decisions={}; // reviewer rulings, keyed by `${sheet}_${findingIndex}` — exported as training data
 const SCALE=1.3;
 
+let debugMode = false;
+let debugLog = [];
+
+function addDebug(msg) {
+  debugLog.push(msg);
+  if (debugMode) {
+    const panel = document.getElementById('debugOutput');
+    panel.innerHTML += `<div>${msg}</div>`;
+    panel.parentElement.scrollTop = panel.parentElement.scrollHeight;
+  }
+}
+
+document.getElementById('toggleDebug').addEventListener('click', () => {
+  debugMode = !debugMode;
+  const panel = document.getElementById('debugPanel');
+  panel.style.display = debugMode ? 'block' : 'none';
+  if (debugMode) {
+    document.getElementById('debugOutput').innerHTML = debugLog.map(m => `<div>${m}</div>`).join('');
+  }
+  document.getElementById('toggleDebug').textContent = debugMode ? '🐛 Debug (ON)' : '🐛 Debug';
+});
+
 async function extractSpans(pdfPage){
   const c=await pdfPage.getTextContent();
   return c.items.map(i=>({text:i.str,x:i.transform[4],y:i.transform[5],x2:i.transform[4]+(i.width||0),y2:i.transform[5]+(i.height||12)})).filter(s=>s.text.trim());
@@ -326,44 +353,97 @@ const IRRELEVANT_KEYWORDS = [
 ];
 
 function extractSheetTitle(spans) {
-  // Sheet titles are typically in the first 5% of spans,
-  // in the title block area, often largest text
-  // Sort by Y position (top of sheet first)
-  const topSpans = spans.slice().sort((a, b) => a.y - b.y).slice(0, 20);
+  addDebug(`[extractSheetTitle] Total spans: ${spans.length}`);
 
-  // Look for patterns like "GENERAL PLAN AND ELEVATION", "FOOTING DETAIL", etc.
-  // Usually all caps, 1-5 words
+  // Sort by Y position (top of sheet first)
+  const topSpans = spans.slice().sort((a, b) => a.y - b.y).slice(0, 30);
+
+  addDebug(`[extractSheetTitle] Top 30 spans by Y position:`);
+  topSpans.slice(0, 10).forEach((s, i) => {
+    addDebug(`  [${i}] "${s.text.substring(0, 40)}"`);
+  });
+
+  // Try regex-based extraction
   const titleCandidates = topSpans
-    .filter(s =>
-      /^[A-Z0-9\s\-&()./]+$/.test(s.text.trim()) &&
-      s.text.trim().length > 5
-    )
+    .filter(s => {
+      const match = /^[A-Z0-9\s\-&().,/]+$/.test(s.text.trim()) && s.text.trim().length > 5;
+      if (match) {
+        addDebug(`  ✓ Regex match: "${s.text.trim().substring(0, 40)}"`);
+      }
+      return match;
+    })
     .map(s => s.text.trim());
 
-  // Return the longest candidate (usually the most specific title)
-  return titleCandidates.length > 0
-    ? titleCandidates.sort((a, b) => b.length - a.length)[0]
-    : '';
+  if (titleCandidates.length > 0) {
+    const best = titleCandidates.sort((a, b) => b.length - a.length)[0];
+    addDebug(`[extractSheetTitle] FOUND (regex): "${best}"`);
+    return best;
+  }
+
+  addDebug(`[extractSheetTitle] No regex matches, trying fallback patterns...`);
+
+  // Fallback: pattern matching
+  const knownPatterns = [
+    /GENERAL NOTES/i,
+    /ESTIMATE OF QUANTITIES/i,
+    /BEGIN ABUTMENT/i,
+    /END ABUTMENT/i,
+    /FOOTING/i,
+    /PIER/i,
+    /WING WALL/i,
+    /ABUTMENT/i,
+    /RETAINING WALL/i,
+    /CONCRETE/i,
+    /GIRDER ELEVATION/i,
+    /FRAMING PLAN/i,
+    /LANDSCAPE DETAILS/i,
+    /TRANSVERSE SECTION/i,
+    /PILE LAYOUT/i,
+    /BAR LIST/i,
+    /REINFORCEMENT/i,
+    /SECTION/i,
+  ];
+
+  for (const pattern of knownPatterns) {
+    const match = spans.find(s => pattern.test(s.text));
+    if (match) {
+      const title = match.text.trim().substring(0, 60);
+      addDebug(`[extractSheetTitle] FOUND (fallback): "${title}" (matched: ${pattern})`);
+      return title;
+    }
+  }
+
+  addDebug(`[extractSheetTitle] FAILED: no title found`);
+  return '';
 }
 
 function isSheet555Relevant(spans) {
   const titleText = extractSheetTitle(spans).toUpperCase();
+  addDebug(`[isSheet555Relevant] Processing title: "${titleText}"`);
 
-  // Veto: irrelevant sheets first
+  if (!titleText) {
+    addDebug(`[isSheet555Relevant] → SKIP (no title)`);
+    return { relevant: false, reason: 'Unable to extract title' };
+  }
+
+  // Check veto list
   for (const keyword of IRRELEVANT_KEYWORDS) {
     if (titleText.includes(keyword.toUpperCase())) {
-      return { relevant: false, reason: `Sheet type: ${keyword}` };
+      addDebug(`[isSheet555Relevant] → SKIP (veto: ${keyword})`);
+      return { relevant: false, reason: `Veto: ${keyword}` };
     }
   }
 
-  // Include: only if title has 555-relevant keywords
+  // Check relevance keywords
   for (const keyword of RELEVANT_555_KEYWORDS) {
     if (titleText.includes(keyword.toUpperCase())) {
+      addDebug(`[isSheet555Relevant] → RELEVANT (matched: ${keyword})`);
       return { relevant: true, sheetType: keyword };
     }
   }
 
-  return { relevant: false, reason: 'Unknown sheet type' };
+  addDebug(`[isSheet555Relevant] → SKIP (unknown sheet)`);
+  return { relevant: false, reason: `Unknown: ${titleText.substring(0, 30)}` };
 }
 
 // Literal, case-insensitive matcher for RULES triggers (no regex — precise)
@@ -453,6 +533,8 @@ document.getElementById('dropZone').addEventListener('drop',e=>{e.preventDefault
 
 async function handleFile(file){
   if(!file)return;
+  debugLog = []; // Clear old logs
+  addDebug(`[handleFile] Loading: ${file.name}`);
   document.getElementById('emptyMid').classList.add('hidden');
   const vw=document.getElementById('viewerWrap');vw.classList.remove('hidden');vw.style.display='flex';
   document.getElementById('sheetsSection').classList.remove('hidden');
