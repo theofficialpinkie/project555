@@ -134,6 +134,9 @@ canvas{border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.12);display:block;}
 .ruling-label.valid{color:var(--green);background:var(--green-light);}
 .ruling-label.false_positive{color:var(--red);background:var(--red-light);}
 .ruling-label.needs_review{color:var(--amber);background:var(--amber-light);}
+.ruling-note{width:100%;margin-top:7px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-family:'Inter',sans-serif;font-size:11px;color:var(--ink2);background:var(--surface);resize:vertical;min-height:42px;box-sizing:border-box;line-height:1.5;cursor:text;}
+.ruling-note:focus{outline:none;border-color:var(--red);}
+.ruling-note::placeholder{color:var(--muted);}
 .stbl-section{margin-top:12px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;}
 .stbl-toggle{font-size:11px;font-weight:600;color:var(--ink);padding:8px 10px;background:var(--bg);cursor:pointer;user-select:none;display:flex;justify-content:space-between;}
 .stbl-toggle:hover{background:var(--border);}
@@ -1289,7 +1292,7 @@ function renderFindingCards(result,container,pageN){
     }));
     // Restore prior ruling if this finding was already judged
     const prior=decisions[`${pageN}_${fi}`];
-    if(prior)applyRulingVisual(card,prior.ruling);
+    if(prior)applyRulingVisual(card,prior.ruling,`${pageN}_${fi}`);
     container.appendChild(card);
   });
   if((result.passing_checks||[]).length){
@@ -1301,23 +1304,47 @@ function renderFindingCards(result,container,pageN){
 }
 
 function setRuling(sheet,fi,ruling,finding,sheetTitle,card){
-  decisions[`${sheet}_${fi}`]={
+  const key=`${sheet}_${fi}`;
+  const prev=decisions[key]||{};
+  decisions[key]={
     ruling,
     sheet,
     sheet_title:sheetTitle,
+    finding_title:finding.title,
+    finding_type:finding.type,
+    severity:finding.severity,
+    description:finding.description,
     element:finding.element_detected,
+    note:prev.note||'',
     ruling_time:new Date().toISOString()
   };
-  applyRulingVisual(card,ruling);
+  applyRulingVisual(card,ruling,key);
 }
 
-function applyRulingVisual(card,ruling){
+function applyRulingVisual(card,ruling,key){
   card.classList.add('ruled');
   const labels={valid:'✓ Marked valid issue',false_positive:'✗ Marked false positive',needs_review:'? Needs engineer review'};
   let lbl=card.querySelector('.ruling-label');
   if(!lbl){lbl=document.createElement('div');lbl.className='ruling-label';card.querySelector('.fcard-inner').appendChild(lbl);}
   lbl.className=`ruling-label ${ruling}`;
   lbl.textContent=labels[ruling]||ruling;
+  // Notes box — shown under a false-positive ruling so the reviewer can capture
+  // context that travels with the finding into the JSON export.
+  let note=card.querySelector('.ruling-note');
+  if(ruling==='false_positive'){
+    if(!note){
+      note=document.createElement('textarea');
+      note.className='ruling-note';
+      note.placeholder='Why is this a false positive? Add context (exported with the finding)…';
+      note.addEventListener('click',e=>e.stopPropagation());
+      note.addEventListener('input',()=>{if(key&&decisions[key])decisions[key].note=note.value;});
+      card.querySelector('.fcard-inner').appendChild(note);
+    }
+    if(key&&decisions[key])note.value=decisions[key].note||'';
+    note.style.display='block';
+  }else if(note){
+    note.style.display='none';
+  }
 }
 
 // Expected vs found summary table built from the findings + passes data
@@ -1359,8 +1386,13 @@ function exportDecisions(){
   const arr=Object.values(decisions).map(d=>({
     sheet:d.sheet,
     sheet_title:d.sheet_title,
+    finding_title:d.finding_title,
+    type:d.finding_type,
+    severity:d.severity,
+    description:d.description,
     element:d.element,
     ruling:d.ruling,
+    note:d.note||'',
     ruling_time:d.ruling_time
   }));
   if(arr.length===0){alert('No reviewer decisions recorded yet. Click ✓ / ✗ / ? on a finding first.');return;}
