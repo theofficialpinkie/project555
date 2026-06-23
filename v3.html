@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PlanReview · Section 555 Checker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f0f0; color: #1a1a1a; }
+
+    /* ── HEADER ── */
+    .header {
+      background: #fff; border-bottom: 1px solid #d0d0d0;
+      padding: 12px 20px; display: flex; justify-content: space-between; align-items: center;
+      height: 52px;
+    }
+    .header h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+    .header-sub { font-size: 11px; color: #888; margin-top: 2px; }
+    .header-right { font-size: 12px; color: #666; text-align: right; }
+
+    /* ── LAYOUT ── */
+    .container {
+      display: grid; grid-template-columns: 240px 1fr 380px;
+      height: calc(100vh - 52px);
+    }
+
+    /* ── LEFT PANEL ── */
+    .left-panel { background: #fff; border-right: 1px solid #d0d0d0; padding: 16px; overflow-y: auto; }
+    .section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #999; margin-bottom: 8px; }
+    .upload-zone {
+      border: 2px dashed #bbb; border-radius: 6px; padding: 20px 12px;
+      text-align: center; cursor: pointer; transition: all 0.15s; margin-bottom: 16px;
+    }
+    .upload-zone:hover { border-color: #666; background: #fafafa; }
+    .upload-zone input { display: none; }
+    .upload-zone p { font-size: 12px; color: #888; }
+    .page-nav { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; }
+    .page-nav button { flex: 1; }
+    .page-nav span { font-size: 12px; color: #666; white-space: nowrap; }
+    button {
+      background: #fff; border: 1px solid #ccc; padding: 6px 10px; border-radius: 4px;
+      font-size: 11px; cursor: pointer; transition: all 0.12s;
+    }
+    button:hover { background: #f5f5f5; border-color: #999; }
+    button.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+    button.primary:hover { background: #333; }
+    .run-btn { width: 100%; margin-bottom: 16px; padding: 10px; font-size: 12px; font-weight: 600; }
+
+    /* Sheet list */
+    .sheet-list { margin-top: 12px; }
+    .sheet-item {
+      padding: 8px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+      display: flex; justify-content: space-between; align-items: center;
+      border: 1px solid transparent; margin-bottom: 4px; transition: all 0.12s;
+    }
+    .sheet-item:hover { background: #f5f5f5; }
+    .sheet-item.active { background: #f0f4ff; border-color: #b0c4ff; }
+    .sheet-item .badge {
+      font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px;
+      background: #f0f0f0; color: #666;
+    }
+    .sheet-item .badge.has-alerts { background: #dc3545; color: #fff; }
+
+    /* ── CENTER PANEL ── */
+    .center-panel {
+      background: #e8e8e8; position: relative; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .pdf-viewport {
+      flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center;
+      position: relative;
+    }
+    .pdf-viewport canvas { max-width: 100%; max-height: 100%; }
+    .canvas-wrapper { position: relative; display: inline-block; }
+    .highlight-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 10;
+    }
+
+    /* ── RIGHT PANEL ── */
+    .right-panel { background: #fff; border-left: 1px solid #d0d0d0; display: flex; flex-direction: column; }
+    .tab-bar {
+      display: flex; border-bottom: 1px solid #d0d0d0; flex-shrink: 0;
+    }
+    .tab-btn {
+      flex: 1; padding: 12px 8px; font-size: 12px; font-weight: 600;
+      text-align: center; cursor: pointer; border: none; border-bottom: 2px solid transparent;
+      background: transparent; color: #888; transition: all 0.15s;
+    }
+    .tab-btn:hover { color: #333; background: #fafafa; }
+    .tab-btn.active { color: #1a1a1a; border-bottom-color: #1a1a1a; }
+    .tab-content { flex: 1; overflow-y: auto; padding: 16px; display: none; }
+    .tab-content.active { display: block; }
+
+    /* Results styling */
+    .result-section { margin-bottom: 20px; }
+    .result-section-header {
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+      color: #999; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eee;
+    }
+    .title-value {
+      font-size: 13px; font-weight: 600; color: #1a1a1a; padding: 8px 10px;
+      background: #f8f8f8; border-radius: 4px; margin-bottom: 6px; line-height: 1.4;
+    }
+    .drawing-title-item {
+      font-size: 12px; color: #333; padding: 6px 10px; border-left: 2px solid #ddd;
+      margin-bottom: 4px; margin-left: 4px;
+    }
+
+    /* Callout rows */
+    .callout-row {
+      padding: 10px 12px; border: 1px solid #eee; border-radius: 4px; margin-bottom: 8px;
+      cursor: pointer; transition: all 0.12s; font-size: 12px;
+    }
+    .callout-row:hover { border-color: #bbb; background: #fafafa; }
+    .callout-row.highlighted { border-color: #f59e0b; background: #fffbeb; }
+    .callout-text { font-weight: 500; margin-bottom: 4px; line-height: 1.4; }
+    .callout-meta { font-size: 10px; color: #888; display: flex; gap: 8px; flex-wrap: wrap; }
+    .callout-status {
+      display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 6px;
+      border-radius: 3px; margin-top: 4px;
+    }
+    .status-matched { background: #dcfce7; color: #166534; }
+    .status-external { background: #fef3c7; color: #92400e; }
+    .status-non555 { background: #dbeafe; color: #1e40af; }
+    .status-noitem { background: #fee2e2; color: #991b1b; }
+
+    /* Alert cards */
+    .alert-card {
+      border: 1px solid #fca5a5; border-radius: 6px; padding: 14px;
+      margin-bottom: 12px; background: #fef2f2; cursor: pointer; transition: all 0.12s;
+    }
+    .alert-card:hover { border-color: #ef4444; box-shadow: 0 2px 8px rgba(239,68,68,0.1); }
+    .alert-card.highlighted { border-color: #ef4444; box-shadow: 0 0 0 2px rgba(239,68,68,0.3); }
+    .alert-title { font-size: 12px; font-weight: 700; color: #991b1b; margin-bottom: 6px; }
+    .alert-callout { font-size: 12px; color: #333; margin-bottom: 6px; font-weight: 500; }
+    .alert-reason { font-size: 11px; color: #666; line-height: 1.5; }
+    .alert-count-banner {
+      text-align: center; padding: 16px; font-size: 14px; font-weight: 700;
+      border-radius: 6px; margin-bottom: 16px;
+    }
+    .alert-count-banner.has-alerts { background: #fef2f2; color: #991b1b; }
+    .alert-count-banner.no-alerts { background: #f0fdf4; color: #166534; }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: #999; font-size: 12px; }
+
+    /* Summary bar */
+    .summary-bar {
+      flex-shrink: 0; background: #f8f8f8; border-top: 1px solid #d0d0d0;
+      padding: 10px 16px; font-size: 11px; color: #666;
+      display: flex; justify-content: space-between;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>PlanReview</h1>
+    <div class="header-sub">Section 555 · Pay Item Checker</div>
+  </div>
+  <div class="header-right">
+    <div id="headerStatus">Upload a PDF to begin</div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- LEFT -->
+  <div class="left-panel">
+    <div class="section-label">Upload</div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".pdf">
+      <p>Drop PDF here<br>or click to browse</p>
+    </div>
+
+    <button class="primary run-btn" id="runBtn" disabled>▶ Run Analysis</button>
+
+    <div class="section-label">Navigation</div>
+    <div class="page-nav">
+      <button id="prevBtn">←</button>
+      <span id="pageLabel">— / —</span>
+      <button id="nextBtn">→</button>
+    </div>
+
+    <div class="section-label">Sheets</div>
+    <div class="sheet-list" id="sheetList">
+      <div class="empty-state">No PDF loaded</div>
+    </div>
+
+    <div style="margin-top: 16px;">
+      <div class="section-label">Tools</div>
+      <button id="exportBtn" style="width:100%; font-size:11px; margin-bottom:6px;" disabled onclick="exportResults()">📊 Export Results (JSON)</button>
+      <button id="evalBtn" style="width:100%; font-size:11px;" disabled onclick="runEval()">🧪 Run Eval</button>
+      <div id="evalPanel" style="display:none; margin-top:8px; padding:10px; background:#f8f8f8; border-radius:4px; font-size:11px; max-height:200px; overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- CENTER -->
+  <div class="center-panel">
+    <div class="pdf-viewport" id="pdfViewport">
+      <div class="empty-state" style="margin: auto;">Upload a PDF to view</div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div class="right-panel">
+    <div class="tab-bar">
+      <div class="tab-btn active" data-tab="understanding" onclick="switchTab('understanding')">Page Understanding</div>
+      <div class="tab-btn" data-tab="alerts" onclick="switchTab('alerts')">Alerts <span id="alertBadge"></span></div>
+    </div>
+
+    <div class="tab-content active" id="tab-understanding">
+      <div class="empty-state">Run analysis to see page structure</div>
+    </div>
+    <div class="tab-content" id="tab-alerts">
+      <div class="empty-state">Run analysis to check for missing items</div>
+    </div>
+
+    <div class="summary-bar">
+      <span id="summaryLeft">—</span>
+      <span id="summaryRight">—</span>
+    </div>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ═══════════════════════════════════════════════════════════════
+// GLOBALS
+// ═══════════════════════════════════════════════════════════════
+let pdfDoc = null, currentPage = 1, pdfFileName = '';
+let pageData = {};           // pageNum → { spans, sheetTitle, drawingTitles, callouts, alerts }
+let currentViewport = null;  // for coordinate transform
+let currentCanvas = null;
+const RENDER_SCALE = 1.5;
+
+// ═══════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════
+const ENGINEERING_KEYWORDS = [
+  'FOOTING','PIER','ABUTMENT','WALL','CONCRETE','GIRDER',
+  'WINGWALL','LAYOUT','RETAINING'
+];
+
+const CONCRETE_TRIGGERS = [
+  // ── Direct 555 pay item language ──
+  'CONCRETE FOR STRUCTURES',          // 555.0021
+  'FOOTING CONCRETE',                 // 555.0011
+  'CONCRETE FOR STRUCTURES, PERFORMANCE', // 555.0021 full name
+  'CONCRETE FOR STRUCTURES - PERFORMANCE',
+  // ── Structural concrete placement phrases ──
+  'STRUCTURAL CONCRETE',
+  'SELF-CONSOLIDATING CONCRETE',
+  'SELF CONSOLIDATING CONCRETE',
+  'SELF-CONSOLIDATION CONCRETE',
+  'CONCRETE PLACEMENT',
+  'TABLE OF CONCRETE PLACEMENTS',
+  'POUR CONCRETE',
+  'POUR SELF-CONSOLIDATION',
+  // ── Concrete deposited under water (555.0031) ──
+  'CONCRETE DEPOSITED UNDER WATER',
+  'TREMIE CONCRETE',
+  // ── NYSDOT abbreviation: CONC. = CONCRETE ──
+  'CONC. FOR STRUCTURES',
+  'CONC. DECK REPAIR',
+  'CONC. PLACEMENT',
+  'FOOTING CONC.',
+  'STRUCTURAL CONC.',
+];
+// Sort longest first so longer phrases match before shorter ones
+const CONCRETE_TRIGGERS_SORTED = CONCRETE_TRIGGERS.slice().sort((a,b)=>b.length-a.length);
+
+// ── Non-555 exclusions: callouts matching these are NOT Section 555 work ──
+// These are concrete-related but paid under other sections entirely.
+const NON_555_EXCLUSIONS = [
+  /\bREMOVAL OF (STRUCTURAL )?CONCRETE\b/i,         // 580.01
+  /\bREMOVAL AND REPLACEMENT OF STRUCTURAL\b/i,      // 582.xx
+  /\bCOLD MILLING\b/i,                                // 490.40
+  /\bMILL OFF\b/i,                                     // 490.40
+  /\bDIAMOND GRINDING\b/i,                            // 557.60
+  /\bCONCRETE OVERLAY\b/i,                             // 584.xx
+  /\bPOLYMER CONCRETE\b/i,                             // 584.xx
+  /\bPROTECTIVE SEAL/i,                               // 559.xx
+  /\bSAWCUT\b/i,                                       // 520/558
+  /\bSAWING CONCRETE\b/i,                              // 520
+  /\bAPPROACH SLAB\b/i,                                // 557.1013
+  /\bSUPERSTRUCTURE SLAB\b/i,                          // 557.1119
+  /\bSIDEWALK/i,                                       // 557.30
+  /\bSAFETY WALK/i,                                    // 557.30
+  /\bPRECAST CONCRETE\b/i,                             // different section
+  /\bFORMLINER\b/i,                                    // formwork, not placement
+  /\bEPOXY COATED\b/i,                                 // 556.xx (reinforcement)
+  /\bBAR REINFORCEMENT\b/i,                            // 709/556
+  /\bWIRE FABRIC\b/i,                                  // 709/556
+  /\bWIRE MESH\b/i,                                    // 709/556
+  /\bREINFORCEMENT (WELDING|BAR|STEEL)\b/i,           // 556/709
+  /\bCONCRETE CYLINDER CURING\b/i,                     // 637
+  /\bMEMBRANE CURING\b/i,                              // curing material, not placement
+  /\bCURING COMPOUND\b/i,                              // curing material
+  /\bCONCRETE REPAIR MATERIAL\b/i,                     // 701-08/701-09
+  /\bMASSONRY|MASONRY\b/i,                             // 560.xx
+  /\bBRICK FACING\b/i,                                 // 560.xx
+  /\bGALVANI[CZ] ANODE/i,                              // 582.99
+  /\bHOT-?DIP GALVANIZ/i,                              // 564.xx
+  /\bBRIDGE RAILING\b/i,                               // 568.xx
+  /\bJOINT SYSTEM\b/i,                                 // 567.xx
+  /\bRIVET REPLACEMENT\b/i,                            // 586.xx
+  /\bBOLTS OR REINFORCEMENT BARS\b/i,                  // 586.xx
+  /\bSURVEY OPERATIONS\b/i,                            // 625.xx
+  /\bTRAFFIC CONTROL\b/i,                              // 619.xx
+];
+
+const ITEM_NUMBER_REGEX = /\b(\d{3}\.\d{2,})\b/g;
+const ITEM_555_REGEX    = /\b(555\.\d{2,})\b/;
+const ITEM_MENTION_REGEX = /ITEM\s+(\d{3}\.\d{2,})/gi;
+
+const METADATA_PATTERNS = [
+  /^DRAWING NO\.?$/i, /^SHEET NO\.?$/i, /^REGION[:\s]/i, /^COUNTY[:\s]/i,
+  /^CONTRACT NUMBER/i, /^FILE NAME/i, /^USER\s*=/i, /^DATE/i, /^SCALE\b/i,
+  /^DESCRIPTION OF ALTER/i, /^AS[\s-]?BUILT REV/i, /^ALL DIMENSIONS/i,
+  /^ALTERED BY/i, /^AFFIX SEAL/i, /^DESIGN\s/i, /^CHECK\s/i, /^DRAFTING\s/i,
+  /^JOB MANAGER/i, /^PROJECT MANAGER/i
+];
+
+const LEGAL_PATTERNS = [
+  /IT IS A VIOLATION OF LAW/i, /SHALL STAMP THE DOCUMENT/i,
+  /LICENSED PROFESSIONAL/i, /ACTING UNDER THE DIRECTION/i
+];
+
+// Proximity threshold (in PDF points) for "nearby" item numbers
+const NEARBY_THRESHOLD = 250;
+
+// Generic concrete callouts assumed relevant to ANY page unless clearly external.
+// These are Section 555 structural concrete operations.
+const GENERIC_CONCRETE_PHRASES = [
+  'CONCRETE FOR STRUCTURES',           // 555.0021
+  'CONCRETE FOR STRUCTURES, PERFORMANCE',
+  'CONCRETE FOR STRUCTURES - PERFORMANCE',
+  'FOOTING CONCRETE',                  // 555.0011
+  'STRUCTURAL CONCRETE',
+  'SELF-CONSOLIDATING CONCRETE',
+  'SELF CONSOLIDATING CONCRETE',
+  'SELF-CONSOLIDATION CONCRETE',
+  'CONCRETE PLACEMENT',
+  'TABLE OF CONCRETE PLACEMENTS',
+  'POUR CONCRETE',
+  'POUR SELF-CONSOLIDATION CONCRETE',
+  'CONCRETE DEPOSITED UNDER WATER',    // 555.0031
+  'TREMIE CONCRETE',
+  // ── CONC. abbreviations ──
+  'CONC. FOR STRUCTURES',
+  'CONC. DECK REPAIR',
+  'FOOTING CONC.',
+  'STRUCTURAL CONC.',
+];
+
+// ═══════════════════════════════════════════════════════════════
+// TRAINING DATA (from Carol's labeled datasets)
+// Derived from: Section 555 spec + Carol's markup PDFs + decision JSONs
+// ═══════════════════════════════════════════════════════════════
+const GOLDEN_EXAMPLES = [
+  // ── From Dataset 5 (Wingwall sheets) ──
+  {
+    id: 'wingwall_culvert_external_reference',
+    description: 'Reinforced concrete box culvert on wingwall sheet is context, not the main point. Do not HIGH alert.',
+    match: { sheetTitleIncludes: ['WINGWALL'], calloutIncludes: ['REINFORCED CONCRETE BOX CULVERT'] },
+    expected: { contextStatus: 'possible_external', shouldHighAlert: false }
+  },
+  {
+    id: 'wingwall_concrete_placements_valid',
+    description: 'Table of concrete placements on wingwall sheet refers to the wingwall concrete. Flag if no 555 item.',
+    match: { sheetTitleIncludes: ['WINGWALL'], calloutIncludes: ['TABLE OF CONCRETE PLACEMENTS'] },
+    expected: { shouldHighAlertIfNoNearby555: true }
+  },
+  {
+    id: 'connectors_precast_concrete_not_555',
+    description: 'Precast concrete is not Section 555. Mechanical connectors paid under 556.0202.',
+    match: { calloutIncludes: ['PRECAST CONCRETE'] },
+    expected: { shouldHighAlert: false }
+  },
+  // ── From Dataset 6 (Gowanus CDR sheets) ──
+  {
+    id: 'self_consolidating_concrete_missing_555',
+    description: 'Self-consolidating concrete pours are 555 structural concrete. Should have 555 item.',
+    match: { calloutIncludes: ['SELF-CONSOLIDATING CONCRETE','SELF-CONSOLIDATION CONCRETE','SELF CONSOLIDATING CONCRETE'] },
+    expected: { shouldHighAlertIfNoNearby555: true }
+  },
+  {
+    id: 'pour_scc_missing_555',
+    description: 'Pour self-consolidation concrete is active 555 placement. Should have 555 item.',
+    match: { calloutIncludes: ['POUR SELF-CONSOLIDATION'] },
+    expected: { shouldHighAlertIfNoNearby555: true }
+  },
+  {
+    id: 'concrete_for_structures_performance_555',
+    description: 'Concrete for Structures, Performance is literally item 555.0021.',
+    match: { calloutIncludes: ['CONCRETE FOR STRUCTURES'] },
+    expected: { shouldHighAlertIfNoNearby555: true }
+  },
+  // ── Non-555 items that should NOT be flagged ──
+  {
+    id: 'approach_slab_is_557_not_555',
+    description: 'Approach slab is Item 557.1013, not Section 555. Should never create 555 alert.',
+    match: { calloutIncludes: ['APPROACH SLAB'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'superstructure_slab_is_557_not_555',
+    description: 'Superstructure slab is Item 557.1119, not Section 555. Should never create 555 alert.',
+    match: { calloutIncludes: ['SUPERSTRUCTURE SLAB'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'removal_structural_concrete_is_580_not_555',
+    description: 'Removal of structural concrete is Item 580.01, not Section 555.',
+    match: { calloutIncludes: ['REMOVAL OF STRUCTURAL CONCRETE'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'cold_milling_concrete_is_490_not_555',
+    description: 'Cold milling of concrete is Item 490.40, not Section 555.',
+    match: { calloutIncludes: ['COLD MILLING','MILL OFF'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'polymer_concrete_overlay_is_584_not_555',
+    description: 'Polymer concrete overlay is Item 584.xx, not Section 555.',
+    match: { calloutIncludes: ['POLYMER CONCRETE OVERLAY'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'protective_sealing_concrete_is_559_not_555',
+    description: 'Protective sealing of concrete is Item 559.xx, not Section 555.',
+    match: { calloutIncludes: ['PROTECTIVE SEALING'] },
+    expected: { shouldHighAlert: false }
+  },
+  {
+    id: 'diamond_grinding_is_557_not_555',
+    description: 'Diamond grinding of slab is Item 557.60, not Section 555.',
+    match: { calloutIncludes: ['DIAMOND GRINDING'] },
+    expected: { shouldHighAlert: false }
+  }
+];
+
+const CALLOUT_CONTEXT_OVERRIDES = [
+  {
+    id: 'wingwall_culvert_external',
+    whenSheetContains: ['WINGWALL'],
+    whenCalloutContains: ['REINFORCED CONCRETE BOX CULVERT','CONCRETE BOX CULVERT'],
+    forceStatus: 'possible_external',
+    allowHighAlert: false,
+    reason: 'Carol: culvert callout on wingwall sheet is context, not the main subject. Item lives on culvert sheet.'
+  },
+  {
+    id: 'precast_concrete_not_555',
+    whenCalloutContains: ['PRECAST CONCRETE'],
+    forceStatus: 'non_555_nearby',
+    allowHighAlert: false,
+    reason: 'Precast concrete is not Section 555. Typically paid under its own precast item or 556.'
+  }
+];
+
+// ═══════════════════════════════════════════════════════════════
+// PDF LOADING
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('uploadZone').addEventListener('click', () => document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', handleFile);
+
+// Drag-drop
+const uz = document.getElementById('uploadZone');
+uz.addEventListener('dragover', e => { e.preventDefault(); uz.style.borderColor = '#666'; });
+uz.addEventListener('dragleave', () => { uz.style.borderColor = '#bbb'; });
+uz.addEventListener('drop', e => {
+  e.preventDefault(); uz.style.borderColor = '#bbb';
+  if (e.dataTransfer.files[0]?.type === 'application/pdf') {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    handleFile({ target: document.getElementById('fileInput') });
+  }
+});
+
+async function handleFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  pdfFileName = file.name;
+  pageData = {};
+  currentPage = 1;
+  const buf = await file.arrayBuffer();
+  pdfDoc = await pdfjsLib.getDocument(buf).promise;
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('headerStatus').textContent = `${file.name} · ${pdfDoc.numPages} pages`;
+  buildSheetList();
+  await renderPage(1);
+}
+
+function buildSheetList() {
+  const list = document.getElementById('sheetList');
+  let html = '';
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    html += `<div class="sheet-item${i===currentPage?' active':''}" data-page="${i}" onclick="goToPage(${i})">
+      <span>Sheet ${i}</span>
+      <span class="badge" id="badge-${i}">—</span>
+    </div>`;
+  }
+  list.innerHTML = html;
+}
+
+function goToPage(n) { renderPage(n); }
+
+async function renderPage(pageNum) {
+  if (!pdfDoc) return;
+  currentPage = pageNum;
+  document.getElementById('pageLabel').textContent = `${pageNum} / ${pdfDoc.numPages}`;
+
+  // Update active sheet
+  document.querySelectorAll('.sheet-item').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.page) === pageNum);
+  });
+
+  const page = await pdfDoc.getPage(pageNum);
+  currentViewport = page.getViewport({ scale: RENDER_SCALE });
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = currentViewport.width;
+  canvas.height = currentViewport.height;
+  currentCanvas = canvas;
+
+  await page.render({ canvasContext: ctx, viewport: currentViewport }).promise;
+
+  const vp = document.getElementById('pdfViewport');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'canvas-wrapper';
+  wrapper.appendChild(canvas);
+
+  // Add SVG overlay for highlights
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('highlight-overlay');
+  svg.setAttribute('viewBox', `0 0 ${canvas.width} ${canvas.height}`);
+  svg.id = 'highlightSvg';
+  wrapper.appendChild(svg);
+
+  vp.innerHTML = '';
+  vp.appendChild(wrapper);
+
+  displayPageData(pageNum);
+}
+
+document.getElementById('prevBtn').addEventListener('click', () => { if (currentPage > 1) renderPage(currentPage - 1); });
+document.getElementById('nextBtn').addEventListener('click', () => { if (pdfDoc && currentPage < pdfDoc.numPages) renderPage(currentPage + 1); });
+
+// ═══════════════════════════════════════════════════════════════
+// COORDINATE CONVERSION (PDF → Canvas)
+// ═══════════════════════════════════════════════════════════════
+function pdfToCanvas(x, y, w, h) {
+  if (!currentViewport) return { cx: 0, cy: 0, cw: 0, ch: 0 };
+  // PDF coordinates: origin bottom-left. Canvas: origin top-left.
+  const [a,b,c,d,e,f] = currentViewport.transform;
+  const cx = a * x + c * y + e;
+  const cy = b * x + d * y + f;
+  return {
+    cx: cx,
+    cy: cy - (Math.abs(d) * h),  // adjust for text height
+    cw: Math.abs(a) * (w || 10),
+    ch: Math.abs(d) * (h || 10)
+  };
+}
+
+function highlightSpan(span, color = '#f59e0b') {
+  const svg = document.getElementById('highlightSvg');
+  if (!svg) return;
+  // Clear previous highlights
+  svg.innerHTML = '';
+
+  const { cx, cy, cw, ch } = pdfToCanvas(span.x, span.y, span.width, span.height);
+
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  rect.setAttribute('x', cx);
+  rect.setAttribute('y', cy);
+  rect.setAttribute('width', Math.max(cw, 60));
+  rect.setAttribute('height', Math.max(ch, 14) + 4);
+  rect.setAttribute('fill', color);
+  rect.setAttribute('opacity', '0.35');
+  rect.setAttribute('rx', '2');
+  svg.appendChild(rect);
+
+  // Also add a border
+  const border = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  border.setAttribute('x', cx);
+  border.setAttribute('y', cy);
+  border.setAttribute('width', Math.max(cw, 60));
+  border.setAttribute('height', Math.max(ch, 14) + 4);
+  border.setAttribute('fill', 'none');
+  border.setAttribute('stroke', color);
+  border.setAttribute('stroke-width', '2');
+  border.setAttribute('rx', '2');
+  svg.appendChild(border);
+
+  // Scroll into view
+  const wrapper = svg.parentElement;
+  const viewport = wrapper.parentElement;
+  viewport.scrollTo({
+    left: cx - viewport.clientWidth / 2,
+    top: cy - viewport.clientHeight / 2,
+    behavior: 'smooth'
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RUN ANALYSIS
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('runBtn').addEventListener('click', runAnalysis);
+
+async function runAnalysis() {
+  if (!pdfDoc) return;
+  document.getElementById('runBtn').textContent = 'Analyzing...';
+  document.getElementById('runBtn').disabled = true;
+
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    await analyzePage(p);
+    // Update badge
+    const d = pageData[p];
+    const badge = document.getElementById(`badge-${p}`);
+    if (badge && d) {
+      const alertCount = d.alerts.length;
+      badge.textContent = alertCount > 0 ? alertCount : '✓';
+      badge.classList.toggle('has-alerts', alertCount > 0);
+    }
+  }
+
+  document.getElementById('runBtn').textContent = '▶ Run Analysis';
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('evalBtn').disabled = false;
+  document.getElementById('exportBtn').disabled = false;
+
+  // Update summary
+  const totalAlerts = Object.values(pageData).reduce((s, d) => s + d.alerts.length, 0);
+  document.getElementById('headerStatus').textContent =
+    `${pdfFileName} · ${pdfDoc.numPages} pages · ${totalAlerts} alert${totalAlerts !== 1 ? 's' : ''}`;
+
+  displayPageData(currentPage);
+}
+
+async function analyzePage(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  const textContent = await page.getTextContent();
+  const viewport = page.getViewport({ scale: 1 }); // unscaled for raw PDF coords
+
+  const spans = textContent.items
+    .filter(item => item.str && item.str.trim())
+    .map(item => ({
+      text: item.str.trim(),
+      fontSize: item.height || 12,
+      x: item.transform[4],
+      y: item.transform[5],
+      width: item.width || 0,
+      height: item.height || 0
+    }));
+
+  const sheetTitle = extractSheetTitle(spans, viewport);
+  const drawingTitles = extractDrawingTitles(spans);
+
+  // Join adjacent spans into logical lines for trigger matching
+  const joinedSpans = joinAdjacentSpans(spans);
+  const callouts = extractConcreteCallouts(joinedSpans);
+
+  // Page-wide 555 scan: check if ANY 555.xxxx item appears anywhere on the page
+  const allPageText = spans.map(s => s.text).join(' ');
+  const page555Items = new Set();
+  let m555;
+  const re555 = /\b(555\.\d{2,})\b/g;
+  while ((m555 = re555.exec(allPageText)) !== null) {
+    page555Items.add(m555[1]);
+  }
+
+  // Enrich each callout
+  callouts.forEach(c => {
+    c.nearestDrawingTitle = findNearestDrawingTitle(c, drawingTitles);
+    // Use raw spans (not joined) for item number proximity — more precise positions
+    c.nearbyItems = findNearbyItemNumbers(c, spans);
+    c.nearby555 = c.nearbyItems.filter(it => it.startsWith('555.'));
+    c.contextStatus = classifyCalloutContext(c, sheetTitle, drawingTitles);
+    applyCalloutOverrides(c, sheetTitle, drawingTitles);
+
+    // Page-wide 555 check: if callout has no nearby 555 but 555 exists on the page,
+    // downgrade from HIGH alert to a softer status
+    if (c.contextStatus === 'matched_no_item' && page555Items.size > 0) {
+      c.contextStatus = '555_on_page_not_nearby';
+      c.page555Items = Array.from(page555Items);
+    }
+  });
+
+  const alerts = buildAlerts(callouts, sheetTitle);
+
+  pageData[pageNum] = { spans, sheetTitle, drawingTitles, callouts, alerts };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EXTRACTION FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+function isMetadata(text) {
+  return METADATA_PATTERNS.some(p => p.test(text));
+}
+function isLegal(text) {
+  return LEGAL_PATTERNS.some(p => p.test(text));
+}
+
+function extractSheetTitle(spans, viewport) {
+  // Sheet title is in the bottom-right title block.
+  // Strategy: find "DRAWING NO" anchor, then look for engineering text nearby.
+  const pageHeight = viewport?.height || 800;
+  const pageWidth  = viewport?.width  || 1100;
+
+  // Title block is roughly bottom 25% of page, right 60%
+  const titleBlockSpans = spans.filter(s =>
+    s.y < pageHeight * 0.30 && s.x > pageWidth * 0.35
+  );
+
+  // Score candidates from title block area
+  const candidates = titleBlockSpans
+    .filter(s => {
+      const t = s.text;
+      if (t.length < 4 || t.length > 120) return false;
+      if (isMetadata(t)) return false;
+      if (isLegal(t)) return false;
+      if (/^\d+$/.test(t)) return false;
+      if ((t.match(/,/g)||[]).length >= 3) return false;
+      // Skip single-char fragments, dates, file paths
+      if (/^\d{1,2}[\/-]\d{1,2}/.test(t)) return false;
+      if (/\.dgn$/i.test(t)) return false;
+      if (/^[A-Z]\.\s/.test(t)) return false; // initials like "K.S. CHAU"
+      return true;
+    })
+    .map(s => ({ ...s, score: scoreTitleCandidate(s.text) }))
+    .sort((a,b) => b.score - a.score);
+
+  if (candidates.length > 0 && candidates[0].score > 20) {
+    return { text: candidates[0].text, x: candidates[0].x, y: candidates[0].y,
+             width: candidates[0].width, height: candidates[0].height,
+             fontSize: candidates[0].fontSize, score: candidates[0].score };
+  }
+
+  // Fallback: scan all spans for engineering keywords
+  const fallback = spans
+    .filter(s => !isMetadata(s.text) && !isLegal(s.text) && s.text.length > 5 && s.text.length < 100)
+    .map(s => ({ ...s, score: scoreTitleCandidate(s.text) }))
+    .sort((a,b) => b.score - a.score);
+
+  if (fallback.length > 0 && fallback[0].score > 30) {
+    return { text: fallback[0].text, x: fallback[0].x, y: fallback[0].y,
+             width: fallback[0].width, height: fallback[0].height,
+             fontSize: fallback[0].fontSize, score: fallback[0].score };
+  }
+  return null;
+}
+
+function scoreTitleCandidate(text) {
+  let score = 0;
+  const upper = text.toUpperCase();
+
+  // Engineering keywords
+  for (const kw of ENGINEERING_KEYWORDS) {
+    if (upper.includes(kw)) score += 60;
+  }
+  // Additional title-like terms
+  if (/DETAIL|SECTION|ELEVATION|PLAN|REPAIR|TYPICAL|REMOVAL|CONSTRUCTION|REINFORCEMENT|SLAB|DECK|BEAM|PILE|REBAR|ESTIMATE|GENERAL|NOTES|QUANTITIES|DRAINAGE/i.test(upper)) score += 40;
+
+  // All caps bonus
+  if (/^[A-Z\d\s\-&().,/:]+$/.test(text)) score += 30;
+
+  // Word count 2-8
+  const words = text.split(/\s+/).length;
+  if (words >= 2 && words <= 8) score += 25;
+  if (words > 12) score -= 20;
+
+  // Penalize names (mixed case, short)
+  if (/^[A-Z][a-z]/.test(text)) score -= 30;
+
+  // Penalize pure numbers, dimensions
+  if (/^\d/.test(text)) score -= 20;
+
+  return score;
+}
+
+function extractDrawingTitles(spans) {
+  // Drawing titles are large-font, all-caps text in the drawing area (not title block).
+  // Group by font size, take larger tiers
+  const bySize = {};
+  spans.forEach(s => {
+    const size = Math.round(s.fontSize * 2) / 2;
+    if (!bySize[size]) bySize[size] = [];
+    bySize[size].push(s);
+  });
+
+  const sizes = Object.keys(bySize).map(Number).sort((a,b) => b - a);
+  if (sizes.length < 2) return [];
+
+  // Drawing titles are typically in top 2 font size tiers
+  const results = [];
+  for (let i = 0; i < Math.min(2, sizes.length); i++) {
+    const tier = bySize[sizes[i]];
+    tier.forEach(s => {
+      const t = s.text;
+      if (t.length < 3 || t.length > 100) return;
+      if (isMetadata(t) || isLegal(t)) return;
+      if (/^\d+$/.test(t)) return;
+      if ((t.match(/,/g)||[]).length >= 3) return;
+      // Must be mostly uppercase
+      if (!/^[A-Z\d\s\-&().,/:]+$/.test(t)) return;
+      // Must have at least one engineering-like word
+      if (/DETAIL|SECTION|ELEVATION|PLAN|VIEW|REPAIR|TYPICAL|FOOTING|PIER|ABUTMENT|WALL|CONCRETE|WING|SLAB|BEAM|REBAR|REINFORCEMENT|LAYOUT|CROSSING|DRAINAGE|REMOVAL|CONSTRUCTION/i.test(t)) {
+        results.push({ text: t, x: s.x, y: s.y, width: s.width, height: s.height, fontSize: s.fontSize });
+      }
+    });
+  }
+  return results;
+}
+
+// ── Span Joining ──
+// PDF.js splits text into small spans. "CONCRETE FOR STRUCTURES" may arrive as
+// 3 separate spans: "CONCRETE", "FOR", "STRUCTURES". We join spans on the same
+// line (within 5pt Y) into logical text lines so triggers can match full phrases.
+function joinAdjacentSpans(spans) {
+  if (spans.length === 0) return [];
+
+  // Sort by Y (descending, PDF coords) then X (ascending)
+  const sorted = spans.slice().sort((a, b) => {
+    const yDiff = b.y - a.y;
+    if (Math.abs(yDiff) > 3) return yDiff;
+    return a.x - b.x;
+  });
+
+  const lines = [];
+  let currentLine = { spans: [sorted[0]], y: sorted[0].y };
+
+  for (let i = 1; i < sorted.length; i++) {
+    const s = sorted[i];
+    // Same line if Y within 5pt and reasonable X gap
+    if (Math.abs(s.y - currentLine.y) <= 5) {
+      currentLine.spans.push(s);
+    } else {
+      lines.push(currentLine);
+      currentLine = { spans: [s], y: s.y };
+    }
+  }
+  lines.push(currentLine);
+
+  // Build joined spans — each line becomes one merged span
+  const joined = [];
+  lines.forEach(line => {
+    // Sort spans within line by X position
+    line.spans.sort((a, b) => a.x - b.x);
+
+    const text = line.spans.map(s => s.text).join(' ');
+    const firstSpan = line.spans[0];
+    const lastSpan = line.spans[line.spans.length - 1];
+
+    joined.push({
+      text: text,
+      fontSize: Math.max(...line.spans.map(s => s.fontSize)),
+      x: firstSpan.x,
+      y: firstSpan.y,
+      width: (lastSpan.x + lastSpan.width) - firstSpan.x,
+      height: Math.max(...line.spans.map(s => s.height)),
+      // Store original spans for precise highlighting
+      sourceSpans: line.spans
+    });
+  });
+
+  return joined;
+}
+
+function extractConcreteCallouts(spans) {
+  // Find all spans that mention concrete-related terms
+  const callouts = [];
+  const seen = new Set();
+
+  spans.forEach(s => {
+    const upper = s.text.toUpperCase();
+    // Check if this span contains any concrete trigger
+    let matched = false;
+    let matchedTrigger = '';
+    for (const trigger of CONCRETE_TRIGGERS_SORTED) {
+      if (upper.includes(trigger.toUpperCase())) {
+        matched = true;
+        matchedTrigger = trigger;
+        break;
+      }
+    }
+    if (!matched) return;
+
+    // Skip legal/metadata
+    if (isLegal(s.text) || isMetadata(s.text)) return;
+
+    // Skip non-555 concrete work (removal, milling, overlay, sealing, etc.)
+    if (NON_555_EXCLUSIONS.some(pattern => pattern.test(s.text))) return;
+
+    // Skip very short fragments
+    if (s.text.length < 4) return;
+
+    // Deduplicate by text+position
+    const key = `${s.text}|${Math.round(s.x)}|${Math.round(s.y)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    callouts.push({
+      id: `c-${callouts.length}`,
+      text: s.text,
+      trigger: matchedTrigger,
+      x: s.x, y: s.y,
+      width: s.width, height: s.height,
+      fontSize: s.fontSize,
+      nearestDrawingTitle: null,
+      nearbyItems: [],
+      nearby555: [],
+      contextStatus: 'unknown'
+    });
+  });
+
+  return callouts;
+}
+
+function findNearestDrawingTitle(callout, drawingTitles) {
+  if (!drawingTitles || drawingTitles.length === 0) return null;
+  let nearest = null, minDist = Infinity;
+  drawingTitles.forEach(dt => {
+    const dist = Math.sqrt(Math.pow(callout.x - dt.x, 2) + Math.pow(callout.y - dt.y, 2));
+    if (dist < minDist) { minDist = dist; nearest = dt; }
+  });
+  return nearest;
+}
+
+function findNearbyItemNumbers(callout, spans) {
+  const items = new Set();
+
+  // First check: is there an item number IN the callout text itself?
+  const selfMatches = callout.text.match(ITEM_NUMBER_REGEX);
+  if (selfMatches) selfMatches.forEach(m => items.add(m));
+
+  // Also check for "ITEM xxx.xx" pattern in the callout text
+  let imMatch;
+  const imRegex = /ITEM\s+(\d{3}\.\d{2,})/gi;
+  while ((imMatch = imRegex.exec(callout.text)) !== null) {
+    items.add(imMatch[1]);
+  }
+
+  // Then check nearby spans
+  spans.forEach(s => {
+    const dist = Math.sqrt(Math.pow(callout.x - s.x, 2) + Math.pow(callout.y - s.y, 2));
+    if (dist > NEARBY_THRESHOLD) return;
+
+    const matches = s.text.match(ITEM_NUMBER_REGEX);
+    if (matches) matches.forEach(m => items.add(m));
+
+    // Also catch "ITEM 555.0021" style references
+    let m2;
+    const r2 = /ITEM\s+(\d{3}\.\d{2,})/gi;
+    while ((m2 = r2.exec(s.text)) !== null) {
+      items.add(m2[1]);
+    }
+  });
+
+  return Array.from(items);
+}
+
+function classifyCalloutContext(callout, sheetTitle, drawingTitles) {
+  const calloutUpper = callout.text.toUpperCase();
+  const sheetUpper = sheetTitle ? sheetTitle.text.toUpperCase() : '';
+  const nearestTitle = callout.nearestDrawingTitle?.text?.toUpperCase() || '';
+
+  // Has a 555 item nearby?
+  const has555 = callout.nearby555.length > 0;
+  // Has any item nearby?
+  const hasItem = callout.nearbyItems.length > 0;
+
+  if (has555) {
+    return 'has_555_item';
+  }
+
+  // ── Generic concrete phrases are ASSUMED RELEVANT to any page ──
+  // These are structural concrete operations that almost always need a 555 item.
+  // They should only be marked external if an override explicitly says so.
+  const isGenericConcrete = GENERIC_CONCRETE_PHRASES.some(phrase =>
+    calloutUpper.includes(phrase.toUpperCase())
+  );
+
+  if (isGenericConcrete) {
+    if (hasItem) return 'non_555_nearby';
+    return 'matched_no_item';  // HIGH alert candidate
+  }
+
+  // ── For specific callouts (e.g. "REINFORCED CONCRETE BOX CULVERT"), ──
+  // ── check if the subject matches this page's context ──
+  const contextWords = (sheetUpper + ' ' + nearestTitle).split(/\s+/).filter(w => w.length > 3);
+  const calloutWords = calloutUpper.split(/\s+/).filter(w => w.length > 3);
+
+  const genericWords = new Set([
+    'CONCRETE','CONC','ITEM','FOR','THE','AND','WITH','PROPOSED','EXISTING',
+    'NEW','TYPE','LIMIT','REPAIR','REMOVAL','TABLE','PLACEMENT','PLACEMENTS',
+    'STRUCTURAL','SELF','CONSOLIDATING','PERFORMANCE','REINFORCED'
+  ]);
+
+  const meaningfulCalloutWords = calloutWords.filter(w => !genericWords.has(w));
+  const meaningfulContextWords = contextWords.filter(w => !genericWords.has(w));
+
+  // Check for overlap between callout subject and page context
+  const overlap = meaningfulCalloutWords.filter(w =>
+    meaningfulContextWords.some(cw => cw.includes(w) || w.includes(cw))
+  );
+
+  if (overlap.length > 0 || meaningfulCalloutWords.length === 0) {
+    // Callout belongs to this page context
+    if (hasItem) return 'non_555_nearby';
+    return 'matched_no_item';  // HIGH alert candidate
+  }
+
+  // No overlap → probably external reference
+  if (hasItem) return 'external_with_item';
+  return 'possible_external';
+}
+
+function applyCalloutOverrides(callout, sheetTitle, drawingTitles) {
+  const calloutUpper = callout.text.toUpperCase();
+  const sheetUpper = sheetTitle ? sheetTitle.text.toUpperCase() : '';
+
+  for (const override of CALLOUT_CONTEXT_OVERRIDES) {
+    // Check sheet condition
+    if (override.whenSheetContains) {
+      const sheetMatch = override.whenSheetContains.some(w => sheetUpper.includes(w.toUpperCase()));
+      if (!sheetMatch) continue;
+    }
+
+    // Check callout condition
+    if (override.whenCalloutContains) {
+      const calloutMatch = override.whenCalloutContains.some(w => calloutUpper.includes(w.toUpperCase()));
+      if (!calloutMatch) continue;
+    }
+
+    // Check nearby item prefix condition
+    if (override.whenNearbyItemPrefix) {
+      const hasMatchingItem = override.whenNearbyItemPrefix.some(prefix =>
+        callout.nearbyItems.some(item => item.startsWith(prefix))
+      );
+      if (!hasMatchingItem) continue;
+    }
+
+    // Override matched — apply it
+    if (override.forceStatus) {
+      callout.contextStatus = override.forceStatus;
+    }
+    callout.overrideId = override.id;
+    callout.overrideReason = override.reason;
+    callout.allowHighAlert = override.allowHighAlert !== undefined ? override.allowHighAlert : true;
+    return; // First match wins
+  }
+
+  // No override matched — default: allow high alert
+  callout.allowHighAlert = true;
+}
+
+function buildAlerts(callouts, sheetTitle) {
+  const alerts = [];
+  callouts.forEach(c => {
+    // Skip if override explicitly blocks HIGH alert
+    if (c.allowHighAlert === false) return;
+
+    if (c.contextStatus === 'matched_no_item') {
+      const reason = c.overrideReason
+        ? `"${c.text}" — ${c.overrideReason}`
+        : `"${c.text}" appears related to this page's context but has no nearby Section 555 item number.`;
+      alerts.push({
+        id: c.id,
+        type: 'missing_555_item',
+        title: 'Concrete element missing 555 item number',
+        calloutText: c.text,
+        trigger: c.trigger,
+        reason: reason,
+        x: c.x, y: c.y, width: c.width, height: c.height
+      });
+    }
+  });
+  return alerts;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DISPLAY
+// ═══════════════════════════════════════════════════════════════
+
+function switchTab(tabName) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tabName}`));
+}
+
+function displayPageData(pageNum) {
+  const d = pageData[pageNum];
+  if (!d) {
+    document.getElementById('tab-understanding').innerHTML = '<div class="empty-state">Run analysis to see page structure</div>';
+    document.getElementById('tab-alerts').innerHTML = '<div class="empty-state">Run analysis to check for missing items</div>';
+    document.getElementById('alertBadge').textContent = '';
+    document.getElementById('summaryLeft').textContent = '—';
+    document.getElementById('summaryRight').textContent = '—';
+    return;
+  }
+
+  // ── TAB 1: Page Understanding ──
+  let html = '';
+
+  // Sheet Title
+  html += '<div class="result-section">';
+  html += '<div class="result-section-header">Sheet Title</div>';
+  if (d.sheetTitle) {
+    html += `<div class="title-value" style="cursor:pointer" onclick="highlightItem(${pageNum},'sheet')">${esc(d.sheetTitle.text)}</div>`;
+  } else {
+    html += '<div style="font-size:12px;color:#999;padding:8px 0;">Could not extract</div>';
+  }
+  html += '</div>';
+
+  // Drawing Titles
+  html += '<div class="result-section">';
+  html += `<div class="result-section-header">Drawing Titles (${d.drawingTitles.length})</div>`;
+  if (d.drawingTitles.length > 0) {
+    d.drawingTitles.forEach((dt, i) => {
+      html += `<div class="drawing-title-item" style="cursor:pointer" onclick="highlightItem(${pageNum},'dt',${i})">${esc(dt.text)}</div>`;
+    });
+  } else {
+    html += '<div style="font-size:12px;color:#999;padding:8px 0;">None detected</div>';
+  }
+  html += '</div>';
+
+  // Concrete Callouts
+  html += '<div class="result-section">';
+  html += `<div class="result-section-header">Concrete Mentions (${d.callouts.length})</div>`;
+  if (d.callouts.length > 0) {
+    d.callouts.forEach((c, i) => {
+      const statusClass = {
+        'has_555_item': 'status-matched',
+        'non_555_nearby': 'status-non555',
+        'matched_no_item': 'status-noitem',
+        '555_on_page_not_nearby': 'status-non555',
+        'external_with_item': 'status-external',
+        'possible_external': 'status-external'
+      }[c.contextStatus] || '';
+
+      const statusLabel = {
+        'has_555_item': '555 item present',
+        'non_555_nearby': 'Non-555 item nearby',
+        'matched_no_item': 'No item nearby',
+        '555_on_page_not_nearby': '555 on page (not adjacent)',
+        'external_with_item': 'Possible external ref',
+        'possible_external': 'Possible external ref'
+      }[c.contextStatus] || 'Unknown';
+
+      html += `<div class="callout-row" id="callout-${c.id}" onclick="clickCallout(${pageNum},${i})">
+        <div class="callout-text">${esc(c.text)}</div>
+        <div class="callout-meta">
+          ${c.nearestDrawingTitle ? `<span>Near: ${esc(c.nearestDrawingTitle.text.substring(0,35))}</span>` : ''}
+          ${c.nearbyItems.length > 0 ? `<span>Items: ${c.nearbyItems.slice(0,3).join(', ')}</span>` : '<span>No items nearby</span>'}
+          ${c.page555Items ? `<span>Page 555: ${c.page555Items.join(', ')}</span>` : ''}
+        </div>
+        <div class="callout-status ${statusClass}">${statusLabel}</div>
+        ${c.overrideReason ? `<div style="font-size:10px;color:#6b7280;margin-top:4px;font-style:italic;">↳ ${esc(c.overrideReason)}</div>` : ''}
+      </div>`;
+    });
+  } else {
+    html += '<div style="font-size:12px;color:#999;padding:8px 0;">No concrete mentions found</div>';
+  }
+  html += '</div>';
+
+  document.getElementById('tab-understanding').innerHTML = html;
+
+  // ── TAB 2: Alerts ──
+  let alertHtml = '';
+  if (d.alerts.length > 0) {
+    alertHtml += `<div class="alert-count-banner has-alerts">${d.alerts.length} potential missing item number${d.alerts.length !== 1 ? 's' : ''}</div>`;
+    d.alerts.forEach((a, i) => {
+      alertHtml += `<div class="alert-card" id="alert-${a.id}" onclick="clickAlert(${pageNum},${i})">
+        <div class="alert-title">⚠ ${esc(a.title)}</div>
+        <div class="alert-callout">"${esc(a.calloutText)}"</div>
+        <div class="alert-reason">${esc(a.reason)}</div>
+      </div>`;
+    });
+  } else {
+    alertHtml += '<div class="alert-count-banner no-alerts">No missing items detected</div>';
+    alertHtml += '<div class="empty-state">All concrete elements on this page appear to have associated item numbers, or are external references to other pages.</div>';
+  }
+  document.getElementById('tab-alerts').innerHTML = alertHtml;
+
+  // Alert badge
+  const totalAlerts = Object.values(pageData).reduce((s, dd) => s + dd.alerts.length, 0);
+  const pageAlerts = d.alerts.length;
+  document.getElementById('alertBadge').textContent = pageAlerts > 0 ? ` (${pageAlerts})` : '';
+
+  // Summary bar
+  document.getElementById('summaryLeft').textContent =
+    d.sheetTitle ? d.sheetTitle.text.substring(0, 40) : 'No title';
+  document.getElementById('summaryRight').textContent =
+    `${d.callouts.length} concrete · ${d.alerts.length} alerts`;
+}
+
+// ── Click handlers ──
+function highlightItem(pageNum, type, index) {
+  const d = pageData[pageNum];
+  if (!d) return;
+  let span;
+  if (type === 'sheet' && d.sheetTitle) span = d.sheetTitle;
+  else if (type === 'dt' && d.drawingTitles[index]) span = d.drawingTitles[index];
+  if (span) highlightSpan(span, '#3b82f6');
+}
+
+function clickCallout(pageNum, index) {
+  const d = pageData[pageNum];
+  if (!d || !d.callouts[index]) return;
+  const c = d.callouts[index];
+
+  // Highlight on PDF
+  highlightSpan(c, c.contextStatus === 'matched_no_item' ? '#ef4444' : '#f59e0b');
+
+  // Highlight in UI
+  document.querySelectorAll('.callout-row').forEach(el => el.classList.remove('highlighted'));
+  const el = document.getElementById(`callout-${c.id}`);
+  if (el) el.classList.add('highlighted');
+}
+
+function clickAlert(pageNum, index) {
+  const d = pageData[pageNum];
+  if (!d || !d.alerts[index]) return;
+  const a = d.alerts[index];
+
+  // Highlight on PDF (red for alerts)
+  highlightSpan(a, '#ef4444');
+
+  // Switch to understanding tab and highlight corresponding callout
+  document.querySelectorAll('.alert-card').forEach(el => el.classList.remove('highlighted'));
+  const el = document.getElementById(`alert-${a.id}`);
+  if (el) el.classList.add('highlighted');
+}
+
+function esc(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORT
+// ═══════════════════════════════════════════════════════════════
+function exportResults() {
+  if (Object.keys(pageData).length === 0) {
+    alert('Run analysis first.');
+    return;
+  }
+
+  const exportData = {
+    pdfName: pdfFileName,
+    exportedAt: new Date().toISOString(),
+    totalPages: pdfDoc ? pdfDoc.numPages : 0,
+    totalAlerts: Object.values(pageData).reduce((s, d) => s + d.alerts.length, 0),
+    pages: {}
+  };
+
+  for (const [pageNum, data] of Object.entries(pageData)) {
+    exportData.pages[pageNum] = {
+      sheetTitle: data.sheetTitle ? data.sheetTitle.text : null,
+      drawingTitles: data.drawingTitles.map(dt => dt.text),
+      concreteCallouts: data.callouts.map(c => ({
+        text: c.text,
+        trigger: c.trigger,
+        contextStatus: c.contextStatus,
+        nearbyItems: c.nearbyItems,
+        nearby555: c.nearby555,
+        nearestDrawingTitle: c.nearestDrawingTitle?.text || null,
+        overrideReason: c.overrideReason || null,
+        page555Items: c.page555Items || null
+      })),
+      alerts: data.alerts.map(a => ({
+        type: a.type,
+        calloutText: a.calloutText,
+        reason: a.reason
+      }))
+    };
+  }
+
+  const json = JSON.stringify(exportData, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const datestamp = new Date().toISOString().split('T')[0];
+  a.download = `planreview_${datestamp}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EVAL MODE
+// ═══════════════════════════════════════════════════════════════
+function runEval() {
+  if (Object.keys(pageData).length === 0) {
+    alert('Run analysis first.');
+    return;
+  }
+
+  const results = [];
+
+  for (const example of GOLDEN_EXAMPLES) {
+    const result = { id: example.id, description: example.description, status: 'skipped', details: '' };
+
+    // Find matching pages and callouts
+    for (const [pageNum, data] of Object.entries(pageData)) {
+      const sheetUpper = data.sheetTitle ? data.sheetTitle.text.toUpperCase() : '';
+
+      // Check sheet title match condition
+      if (example.match.sheetTitleIncludes) {
+        const sheetMatch = example.match.sheetTitleIncludes.some(w => sheetUpper.includes(w.toUpperCase()));
+        if (!sheetMatch) continue;
+      }
+
+      // Check callout match condition
+      if (example.match.calloutIncludes) {
+        const matchingCallouts = data.callouts.filter(c => {
+          const cUpper = c.text.toUpperCase();
+          return example.match.calloutIncludes.some(w => cUpper.includes(w.toUpperCase()));
+        });
+
+        if (matchingCallouts.length === 0) {
+          // Callout not found on this page — might be on another page
+          continue;
+        }
+
+        // Evaluate each matching callout
+        for (const callout of matchingCallouts) {
+          result.status = 'pass';
+
+          // Check expected contextStatus
+          if (example.expected.contextStatus) {
+            if (callout.contextStatus !== example.expected.contextStatus) {
+              result.status = 'fail';
+              result.details += `Page ${pageNum}: Expected status "${example.expected.contextStatus}", got "${callout.contextStatus}". `;
+            }
+          }
+
+          // Check shouldHighAlert
+          if (example.expected.shouldHighAlert === false) {
+            const hasAlert = data.alerts.some(a => a.id === callout.id);
+            if (hasAlert) {
+              result.status = 'fail';
+              result.details += `Page ${pageNum}: Expected NO high alert, but alert was created. `;
+            }
+          }
+
+          // Check shouldHighAlertIfNoNearby555
+          if (example.expected.shouldHighAlertIfNoNearby555 === true) {
+            if (callout.nearby555.length === 0) {
+              const hasAlert = data.alerts.some(a => a.id === callout.id);
+              if (!hasAlert) {
+                result.status = 'fail';
+                result.details += `Page ${pageNum}: Expected HIGH alert (no 555 nearby), but none created. `;
+              }
+            }
+          }
+
+          // Check nearbyItemIncludes
+          if (example.expected.nearbyItemIncludes) {
+            for (const expectedItem of example.expected.nearbyItemIncludes) {
+              if (!callout.nearbyItems.includes(expectedItem)) {
+                result.status = 'fail';
+                result.details += `Page ${pageNum}: Expected nearby item "${expectedItem}" not found. `;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    results.push(result);
+  }
+
+  // Display results
+  const passed = results.filter(r => r.status === 'pass').length;
+  const failed = results.filter(r => r.status === 'fail').length;
+  const skipped = results.filter(r => r.status === 'skipped').length;
+
+  let html = `<div style="margin-bottom:8px;font-weight:600;">
+    <span style="color:#166534;">✓ ${passed}</span> · 
+    <span style="color:#991b1b;">✗ ${failed}</span> · 
+    <span style="color:#666;">⊘ ${skipped}</span>
+  </div>`;
+
+  results.forEach(r => {
+    const color = r.status === 'pass' ? '#166534' : r.status === 'fail' ? '#991b1b' : '#666';
+    const icon = r.status === 'pass' ? '✓' : r.status === 'fail' ? '✗' : '⊘';
+    html += `<div style="margin-bottom:6px;padding:4px 0;border-bottom:1px solid #eee;">
+      <span style="color:${color};font-weight:700;">${icon}</span>
+      <span style="font-size:10px;">${esc(r.id)}</span>
+      ${r.details ? `<div style="font-size:10px;color:#991b1b;margin-top:2px;">${esc(r.details)}</div>` : ''}
+    </div>`;
+  });
+
+  const panel = document.getElementById('evalPanel');
+  panel.innerHTML = html;
+  panel.style.display = 'block';
+}
+
+</script>
+</body>
+</html>
