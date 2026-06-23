@@ -208,6 +208,7 @@
     <div class="tab-bar">
       <div class="tab-btn active" data-tab="understanding" onclick="switchTab('understanding')">Page Understanding</div>
       <div class="tab-btn" data-tab="alerts" onclick="switchTab('alerts')">Alerts <span id="alertBadge"></span></div>
+      <div class="tab-btn" data-tab="debug" onclick="switchTab('debug')">Debug</div>
     </div>
 
     <div class="tab-content active" id="tab-understanding">
@@ -215,6 +216,9 @@
     </div>
     <div class="tab-content" id="tab-alerts">
       <div class="empty-state">Run analysis to check for missing items</div>
+    </div>
+    <div class="tab-content" id="tab-debug">
+      <div class="empty-state">Run analysis to see extraction debug info</div>
     </div>
 
     <div class="summary-bar">
@@ -660,9 +664,14 @@ async function analyzePage(pageNum) {
   const sheetTitle = extractSheetTitle(spans, viewport);
   const drawingTitles = extractDrawingTitles(spans);
 
-  // Join adjacent spans into logical lines for trigger matching
+  // Join adjacent spans into logical segments for multi-word trigger matching
   const joinedSpans = joinAdjacentSpans(spans);
-  const callouts = extractConcreteCallouts(joinedSpans);
+
+  // Debug log for this page
+  const debugLog = {};
+
+  // Dual-pass concrete extraction: raw spans + joined lines
+  const callouts = extractConcreteCallouts(spans, joinedSpans, debugLog);
 
   // Page-wide 555 scan: check if ANY 555.xxxx item appears anywhere on the page
   const allPageText = spans.map(s => s.text).join(' ');
@@ -676,7 +685,7 @@ async function analyzePage(pageNum) {
   // Enrich each callout
   callouts.forEach(c => {
     c.nearestDrawingTitle = findNearestDrawingTitle(c, drawingTitles);
-    // Use raw spans (not joined) for item number proximity — more precise positions
+    // Use raw spans for item number proximity — more precise positions
     c.nearbyItems = findNearbyItemNumbers(c, spans);
     c.nearby555 = c.nearbyItems.filter(it => it.startsWith('555.'));
     c.contextStatus = classifyCalloutContext(c, sheetTitle, drawingTitles);
@@ -692,7 +701,17 @@ async function analyzePage(pageNum) {
 
   const alerts = buildAlerts(callouts, sheetTitle);
 
-  pageData[pageNum] = { spans, sheetTitle, drawingTitles, callouts, alerts };
+  // Store debug info
+  debugLog.sheetTitleCandidates = spans
+    .filter(s => !isMetadata(s.text) && !isLegal(s.text) && s.text.length > 4)
+    .map(s => ({ text: s.text.substring(0, 80), score: scoreTitleCandidate(s.text), y: Math.round(s.y), x: Math.round(s.x) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  debugLog.page555Items = Array.from(page555Items);
+  debugLog.joinedLineCount = joinedSpans.length;
+  debugLog.rawSpanCount = spans.length;
+
+  pageData[pageNum] = { spans, sheetTitle, drawingTitles, callouts, alerts, debugLog };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -818,105 +837,162 @@ function extractDrawingTitles(spans) {
 }
 
 // ── Span Joining ──
-// PDF.js splits text into small spans. "CONCRETE FOR STRUCTURES" may arrive as
-// 3 separate spans: "CONCRETE", "FOR", "STRUCTURES". We join spans on the same
-// line (within 5pt Y) into logical text lines so triggers can match full phrases.
+// PDF.js splits text into small fragments. "CONCRETE FOR STRUCTURES" may arrive
+// as separate spans. We join spans on the same line into logical text segments.
+// IMPORTANT: Cap merged width to avoid monster lines that mix unrelated callouts.
 function joinAdjacentSpans(spans) {
   if (spans.length === 0) return [];
 
-  // Sort by Y (descending, PDF coords) then X (ascending)
+  // Sort by Y descending (top of page first in PDF coords), then X ascending
   const sorted = spans.slice().sort((a, b) => {
     const yDiff = b.y - a.y;
     if (Math.abs(yDiff) > 3) return yDiff;
     return a.x - b.x;
   });
 
+  // Group into lines by Y proximity
   const lines = [];
-  let currentLine = { spans: [sorted[0]], y: sorted[0].y };
+  let currentLine = [sorted[0]];
 
   for (let i = 1; i < sorted.length; i++) {
     const s = sorted[i];
-    // Same line if Y within 5pt and reasonable X gap
-    if (Math.abs(s.y - currentLine.y) <= 5) {
-      currentLine.spans.push(s);
+    const lastInLine = currentLine[currentLine.length - 1];
+    // Same line: Y within 4pt of the most recent span (not the first — prevents drift)
+    if (Math.abs(s.y - lastInLine.y) <= 4) {
+      currentLine.push(s);
     } else {
       lines.push(currentLine);
-      currentLine = { spans: [s], y: s.y };
+      currentLine = [s];
     }
   }
   lines.push(currentLine);
 
-  // Build joined spans — each line becomes one merged span
+  // Build joined spans from each line, but split if X-gap is too large (>100pt)
   const joined = [];
-  lines.forEach(line => {
-    // Sort spans within line by X position
-    line.spans.sort((a, b) => a.x - b.x);
+  lines.forEach(lineSpans => {
+    lineSpans.sort((a, b) => a.x - b.x);
 
-    const text = line.spans.map(s => s.text).join(' ');
-    const firstSpan = line.spans[0];
-    const lastSpan = line.spans[line.spans.length - 1];
-
-    joined.push({
-      text: text,
-      fontSize: Math.max(...line.spans.map(s => s.fontSize)),
-      x: firstSpan.x,
-      y: firstSpan.y,
-      width: (lastSpan.x + lastSpan.width) - firstSpan.x,
-      height: Math.max(...line.spans.map(s => s.height)),
-      // Store original spans for precise highlighting
-      sourceSpans: line.spans
-    });
+    // Split line into segments by large X gaps (unrelated text clusters)
+    let segment = [lineSpans[0]];
+    for (let i = 1; i < lineSpans.length; i++) {
+      const prev = lineSpans[i - 1];
+      const curr = lineSpans[i];
+      const gap = curr.x - (prev.x + prev.width);
+      // If gap > 80pt, start a new segment (different text cluster on same line)
+      if (gap > 80) {
+        pushSegment(joined, segment);
+        segment = [curr];
+      } else {
+        segment.push(curr);
+      }
+    }
+    pushSegment(joined, segment);
   });
 
   return joined;
 }
 
-function extractConcreteCallouts(spans) {
-  // Find all spans that mention concrete-related terms
-  const callouts = [];
-  const seen = new Set();
+function pushSegment(joined, segment) {
+  if (segment.length === 0) return;
+  const text = segment.map(s => s.text).join(' ');
+  const first = segment[0];
+  const last = segment[segment.length - 1];
+  joined.push({
+    text: text,
+    fontSize: Math.max(...segment.map(s => s.fontSize)),
+    x: first.x,
+    y: first.y,
+    width: (last.x + last.width) - first.x,
+    height: Math.max(...segment.map(s => s.height)),
+    sourceSpans: segment
+  });
+}
 
-  spans.forEach(s => {
-    const upper = s.text.toUpperCase();
-    // Check if this span contains any concrete trigger
-    let matched = false;
+// ── Concrete Callout Extraction (dual-pass) ──
+// Pass 1: Check each RAW span individually (catches single-span matches)
+// Pass 2: Check JOINED lines (catches multi-span phrases like "CONCRETE" + "FOR" + "STRUCTURES")
+// Exclusions are checked per-span, not per-joined-line, to avoid false kills.
+function extractConcreteCallouts(rawSpans, joinedSpans, debugLog) {
+  const callouts = [];
+  const seen = new Set(); // dedupe by position
+  const concreteRe = /CONCRETE|CONC\.|GROUT|TREMIE/i;
+
+  // ── Debug: log all raw spans with concrete ──
+  if (debugLog) {
+    debugLog.rawConcreteSpans = rawSpans.filter(s => concreteRe.test(s.text));
+    debugLog.joinedConcreteLines = joinedSpans.filter(s => concreteRe.test(s.text));
+    debugLog.excludedCandidates = [];
+  }
+
+  function tryAddCallout(text, x, y, width, height, fontSize, source) {
+    const upper = text.toUpperCase();
+
+    // Check triggers
     let matchedTrigger = '';
     for (const trigger of CONCRETE_TRIGGERS_SORTED) {
       if (upper.includes(trigger.toUpperCase())) {
-        matched = true;
         matchedTrigger = trigger;
         break;
       }
     }
-    if (!matched) return;
+    if (!matchedTrigger) return false;
 
     // Skip legal/metadata
-    if (isLegal(s.text) || isMetadata(s.text)) return;
+    if (isLegal(text) || isMetadata(text)) {
+      if (debugLog) debugLog.excludedCandidates.push({ text, reason: 'legal/metadata', source });
+      return false;
+    }
 
-    // Skip non-555 concrete work (removal, milling, overlay, sealing, etc.)
-    if (NON_555_EXCLUSIONS.some(pattern => pattern.test(s.text))) return;
+    // Skip non-555 — but check only a NARROW window around the trigger, not full text
+    // Extract ~30 chars around the trigger match for exclusion checking
+    const triggerIdx = upper.indexOf(matchedTrigger.toUpperCase());
+    const windowStart = Math.max(0, triggerIdx - 30);
+    const windowEnd = Math.min(text.length, triggerIdx + matchedTrigger.length + 30);
+    const windowText = text.substring(windowStart, windowEnd);
 
-    // Skip very short fragments
-    if (s.text.length < 4) return;
+    const exclusionMatch = NON_555_EXCLUSIONS.find(pattern => pattern.test(windowText));
+    if (exclusionMatch) {
+      if (debugLog) debugLog.excludedCandidates.push({ text: text.substring(0, 100), reason: `exclusion: ${exclusionMatch}`, source });
+      return false;
+    }
 
-    // Deduplicate by text+position
-    const key = `${s.text}|${Math.round(s.x)}|${Math.round(s.y)}`;
-    if (seen.has(key)) return;
+    // Skip very short
+    if (text.length < 4) return false;
+
+    // Dedupe by position (round to 10pt grid to catch near-duplicates)
+    const key = `${Math.round(x / 10)}|${Math.round(y / 10)}`;
+    if (seen.has(key)) return false;
     seen.add(key);
 
     callouts.push({
       id: `c-${callouts.length}`,
-      text: s.text,
+      text: text.length > 150 ? text.substring(0, 150) + '...' : text,
       trigger: matchedTrigger,
-      x: s.x, y: s.y,
-      width: s.width, height: s.height,
-      fontSize: s.fontSize,
+      x, y, width, height, fontSize,
       nearestDrawingTitle: null,
       nearbyItems: [],
       nearby555: [],
-      contextStatus: 'unknown'
+      contextStatus: 'unknown',
+      source: source
     });
+    return true;
+  }
+
+  // ── Pass 1: Raw spans (single-span matches) ──
+  rawSpans.forEach(s => {
+    tryAddCallout(s.text, s.x, s.y, s.width, s.height, s.fontSize, 'raw');
   });
+
+  // ── Pass 2: Joined lines (multi-span phrases not caught by Pass 1) ──
+  joinedSpans.forEach(s => {
+    tryAddCallout(s.text, s.x, s.y, s.width, s.height, s.fontSize, 'joined');
+  });
+
+  if (debugLog) {
+    debugLog.totalCallouts = callouts.length;
+    debugLog.rawMatches = callouts.filter(c => c.source === 'raw').length;
+    debugLog.joinedMatches = callouts.filter(c => c.source === 'joined').length;
+  }
 
   return callouts;
 }
@@ -1185,6 +1261,81 @@ function displayPageData(pageNum) {
     alertHtml += '<div class="empty-state">All concrete elements on this page appear to have associated item numbers, or are external references to other pages.</div>';
   }
   document.getElementById('tab-alerts').innerHTML = alertHtml;
+
+  // ── TAB 3: Debug ──
+  let dbg = '';
+  if (d.debugLog) {
+    const dl = d.debugLog;
+
+    // Stats
+    dbg += '<div class="result-section">';
+    dbg += '<div class="result-section-header">Extraction Stats</div>';
+    dbg += `<div style="font-size:11px;line-height:1.8;padding:8px;background:#f8f8f8;border-radius:4px;">
+      Raw spans: ${dl.rawSpanCount}<br>
+      Joined segments: ${dl.joinedLineCount}<br>
+      Callouts found: ${dl.totalCallouts} (${dl.rawMatches} raw, ${dl.joinedMatches} joined)<br>
+      Page 555 items: ${dl.page555Items.length > 0 ? dl.page555Items.join(', ') : 'none'}<br>
+      Excluded candidates: ${dl.excludedCandidates ? dl.excludedCandidates.length : 0}
+    </div></div>`;
+
+    // Raw spans with CONCRETE
+    dbg += '<div class="result-section">';
+    dbg += `<div class="result-section-header">Raw Spans with CONCRETE/CONC. (${dl.rawConcreteSpans ? dl.rawConcreteSpans.length : 0})</div>`;
+    if (dl.rawConcreteSpans && dl.rawConcreteSpans.length > 0) {
+      dl.rawConcreteSpans.forEach(s => {
+        dbg += `<div style="font-size:10px;padding:4px 6px;border-bottom:1px solid #eee;font-family:monospace;word-break:break-all;">
+          "${esc(s.text.substring(0, 120))}" <span style="color:#999;">[${s.fontSize.toFixed(1)}pt, ${Math.round(s.x)},${Math.round(s.y)}]</span>
+        </div>`;
+      });
+    } else {
+      dbg += '<div style="font-size:11px;color:#999;padding:4px;">None found</div>';
+    }
+    dbg += '</div>';
+
+    // Joined lines with CONCRETE
+    dbg += '<div class="result-section">';
+    dbg += `<div class="result-section-header">Joined Lines with CONCRETE/CONC. (${dl.joinedConcreteLines ? dl.joinedConcreteLines.length : 0})</div>`;
+    if (dl.joinedConcreteLines && dl.joinedConcreteLines.length > 0) {
+      dl.joinedConcreteLines.forEach(s => {
+        dbg += `<div style="font-size:10px;padding:4px 6px;border-bottom:1px solid #eee;font-family:monospace;word-break:break-all;">
+          "${esc(s.text.substring(0, 200))}" <span style="color:#999;">[${Math.round(s.x)},${Math.round(s.y)}, w=${Math.round(s.width)}]</span>
+        </div>`;
+      });
+    } else {
+      dbg += '<div style="font-size:11px;color:#999;padding:4px;">None found</div>';
+    }
+    dbg += '</div>';
+
+    // Excluded candidates
+    dbg += '<div class="result-section">';
+    dbg += `<div class="result-section-header">Excluded Candidates (${dl.excludedCandidates ? dl.excludedCandidates.length : 0})</div>`;
+    if (dl.excludedCandidates && dl.excludedCandidates.length > 0) {
+      dl.excludedCandidates.forEach(e => {
+        dbg += `<div style="font-size:10px;padding:4px 6px;border-bottom:1px solid #eee;">
+          <span style="font-family:monospace;word-break:break-all;">"${esc(e.text.substring(0, 100))}"</span><br>
+          <span style="color:#dc3545;">✗ ${esc(e.reason)}</span>
+          <span style="color:#999;"> (${e.source})</span>
+        </div>`;
+      });
+    } else {
+      dbg += '<div style="font-size:11px;color:#999;padding:4px;">None excluded</div>';
+    }
+    dbg += '</div>';
+
+    // Sheet title candidates
+    dbg += '<div class="result-section">';
+    dbg += '<div class="result-section-header">Sheet Title Candidates (top 10 by score)</div>';
+    if (dl.sheetTitleCandidates) {
+      dl.sheetTitleCandidates.forEach((c, i) => {
+        const isBest = d.sheetTitle && c.text === d.sheetTitle.text.substring(0, 80);
+        dbg += `<div style="font-size:10px;padding:4px 6px;border-bottom:1px solid #eee;${isBest ? 'background:#f0f7ff;font-weight:600;' : ''}">
+          ${i+1}. "${esc(c.text)}" <span style="color:#999;">score:${c.score} [${c.x},${c.y}]</span>
+        </div>`;
+      });
+    }
+    dbg += '</div>';
+  }
+  document.getElementById('tab-debug').innerHTML = dbg || '<div class="empty-state">No debug data</div>';
 
   // Alert badge
   const totalAlerts = Object.values(pageData).reduce((s, dd) => s + dd.alerts.length, 0);
